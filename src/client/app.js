@@ -4,7 +4,8 @@ const state = { page: 'home', catalog: [], saved: [], stats: {}, prefs: {}, matc
   selected: new Set(), lastCard: false, ready: false, plan: [],
   setup: { game: 'four-color', humans: 1, ai: 2, difficulty: 'medium' },
   account: { username: 'Guest', status: 'guest', available: 'false' }, profile: { display_name: 'Guest', avatar: 'initials' },
-  authMode: 'login', remote: null, invite: null, matchSource: 'local' };
+  authMode: 'login', remote: null, invite: null, matchSource: 'local',
+  handoffBusy: false, revealAnimation: false, justSelectedCard: null };
 const root = document.getElementById('app');
 
 function node(tag, attrs = {}, ...children) {
@@ -59,7 +60,7 @@ function nav(page) {
       state.viewer = state.remote.seat; state.matchSource = 'remote'; state.page = 'online'; });
     return;
   }
-  state.page = page; state.ready = false; state.selected.clear(); render();
+  state.page = page; state.ready = false; state.revealAnimation = false; state.selected.clear(); render();
 }
 function shell(content) {
   const app = node('div', { class: 'shell' });
@@ -92,6 +93,10 @@ function gameTile(item) {
       },
         { class: 'primary full', disabled: !playable })));
 }
+function soloHumanId(match) {
+  const humans = match?.players?.filter(player => player.kind === 'human') || [];
+  return humans.length === 1 ? humans[0].id : null;
+}
 function home() {
   return node('div', {},
     node('div', { class: 'hero' }, node('div', {}, node('span', { class: 'eyebrow' }, 'YOUR TABLE IS READY'),
@@ -110,6 +115,8 @@ function savedTile(item) {
     button(item.completed ? 'Review' : 'Continue', () => task(async () => {
       state.match = await api(`/matches/${item.id}?viewer=`);
       state.viewer = null; state.plan = []; state.page = 'table'; state.ready = false; state.matchSource = 'local';
+      const onlyHuman = soloHumanId(state.match);
+      if (onlyHuman) { await refreshMatch(onlyHuman); state.ready = true; }
     }), { class: 'primary' })));
 }
 function games() { return node('div', {}, node('span', { class: 'eyebrow' }, 'THE COLLECTION'),
@@ -142,6 +149,8 @@ function setup() {
           ];
           state.match = await api('/matches', { method: 'POST', body: JSON.stringify({ game: state.setup.game, participants, difficulty: state.setup.difficulty }) });
           state.viewer = null; state.ready = false; state.plan = []; state.page = 'table'; state.matchSource = 'local';
+          const onlyHuman = soloHumanId(state.match);
+          if (onlyHuman) { state.viewer = onlyHuman; state.ready = true; state.revealAnimation = motionEnabled(); }
           state.saved = await api('/matches'); state.stats = await api('/stats');
         }), { class: 'primary' }))));
 }
@@ -152,6 +161,58 @@ function fourfoldArt(card) {
   const el = node('img', { src: `/assets/fourfold/${aliases[card] || card}.jpg`, alt: card.replace('-', ' '), loading: 'lazy' });
   el.addEventListener('error', () => el.replaceWith(node('span', { class: 'art-fallback' }, card)));
   return el;
+}
+function motionEnabled() {
+  return state.prefs.motion !== false &&
+    !(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
+}
+function applyAppearance() {
+  document.documentElement.dataset.theme = state.prefs.theme;
+  document.documentElement.dataset.motion = state.prefs.motion === false ? 'reduce' : 'normal';
+}
+function handoffPanel(game, next, label) {
+  const visual = node('div', { class: 'handoff-card', 'aria-hidden': 'true' },
+    node('div', { class: 'handoff-card-inner' },
+      node('div', { class: 'handoff-card-side handoff-card-back' },
+        node('img', { src: `/assets/${game === 'fourfold' ? 'fourfold' : 'colors'}/cover.jpg`, alt: '' })),
+      node('div', { class: 'handoff-card-side handoff-card-front' }, '♠  ♥  ♦  ♣')));
+  const confirm = button(next ? `I'm ${next.name} — Reveal ${label}` : 'Waiting for player',
+    () => task(async () => {
+      if (!next || state.handoffBusy) return;
+      state.handoffBusy = true;
+      confirm.disabled = true;
+      const animate = motionEnabled();
+      try {
+        if (animate) {
+          visual.classList.add('is-flipping');
+          await new Promise(resolve => setTimeout(resolve, 390));
+        }
+        await refreshMatch(next.id);
+        state.ready = true;
+        state.plan = [];
+        state.revealAnimation = animate;
+      } catch (error) {
+        visual.classList.remove('is-flipping');
+        confirm.disabled = false;
+        throw error;
+      } finally {
+        state.handoffBusy = false;
+      }
+    }), { class: 'primary handoff-confirm', disabled: !next });
+  return node('section', { class: 'panel handoff-panel', role: 'group', 'aria-label': 'Private turn handoff' },
+    visual,
+    node('div', { class: 'handoff-copy' }, node('span', { class: 'eyebrow' }, 'PRIVATE HANDOFF'),
+      title(next ? `${next.name}, you're up` : 'Waiting for the next player', 3),
+      node('p', { class: 'muted' }, 'The table stays visible. Your private cards and orders remain concealed until you confirm.'),
+      node('div', { class: 'row handoff-actions' }, confirm,
+        button('Return home', () => nav('home'), { class: 'subtle' }))));
+}
+async function animatePlayedCard(card) {
+  if (!motionEnabled()) return;
+  const selected = [...document.querySelectorAll('[data-card]')].find(el => el.getAttribute('data-card') === card);
+  if (!selected) return;
+  selected.classList.add('is-playing');
+  await new Promise(resolve => setTimeout(resolve, 260));
 }
 async function choose(message, options) {
   return new Promise(resolve => {
@@ -181,9 +242,21 @@ async function perform(actor, command, args = {}) {
     state.lastCard = false; state.ready = true;
     return;
   }
-  await api(`/matches/${match.id}/actions`, { method: 'POST', body: JSON.stringify({ actor, command, args, revision: match.revision }) });
+  const result = await api(`/matches/${match.id}/actions`, {
+    method: 'POST', body: JSON.stringify({ actor, command, args, revision: match.revision }) });
   state.selected.clear(); state.lastCard = false; state.ready = false; state.plan = [];
-  await refreshMatch(null);
+  const solo = soloHumanId(result);
+  const nextDecision = result.game === 'fourfold' ? result.players.find(p => p.kind === 'human' && !p.ready)?.id :
+    result.outstanding?.find(c => result.players.some(p => p.id === c.player && p.kind === 'human'))?.player ||
+    result.players[result.current]?.id;
+  if (solo || nextDecision === actor || result.winner || result.phase === 'complete') {
+    state.match = result;
+    state.viewer = solo || actor;
+    state.ready = true;
+    state.revealAnimation = motionEnabled() && result.game === 'fourfold' && result.round !== match.round;
+  } else {
+    await refreshMatch(null);
+  }
 }
 async function playCard(card) {
   const match = state.match, player = match.players[match.current];
@@ -194,6 +267,7 @@ async function playCard(card) {
   if (family === 'Wild') args.number = await choose('Declare a number', Array.from({ length: 14 }, (_, i) => [i, String(i)]));
   if (family === 'verdict') args.target = await choose('Select an opponent', match.players.filter(p => p.id !== player.id).map(p => [p.id, p.name]));
   if (family === 'steal') args.steal = await choose('Take an earlier discard', match.stealable.map(c => [c, c]));
+  await animatePlayedCard(card);
   await perform(player.id, 'play', args);
 }
 function table() {
@@ -209,14 +283,9 @@ function table() {
       button('Return to online rooms', () => nav('online')));
   }
   const nextId = pendingId || (current.kind === 'human' ? current.id : null);
-  if (!m.winner && (!state.ready || state.viewer !== nextId)) {
-    return node('div', { class: 'narrow reveal' }, node('span', { class: 'eyebrow' }, 'PRIVATE TURN'),
-      title(nextId ? `Pass the device to ${m.players.find(p => p.id === nextId)?.name}` : 'Computer is playing', 1),
-      node('p', { class: 'muted' }, 'Other hands remain hidden until the next player confirms.'),
-      button('Reveal my cards', () => task(async () => { await refreshMatch(nextId); state.ready = true; }),
-        { class: 'primary', disabled: !nextId }), button('Return home', () => nav('home')));
-  }
-  const me = m.players.find(p => p.id === state.viewer);
+  const handoff = state.matchSource === 'local' && !m.winner && (!state.ready || state.viewer !== nextId);
+  const next = m.players.find(p => p.id === nextId);
+  const me = handoff ? null : m.players.find(p => p.id === state.viewer);
   const choice = m.choices?.[0];
   return node('div', { class: 'game-screen' },
     node('div', { class: 'row split' }, node('div', {}, node('span', { class: 'eyebrow' }, 'FOUR-COLOR'),
@@ -233,7 +302,8 @@ function table() {
         `Active ${m.active_color} · ${m.direction === 1 ? 'Clockwise ↻' : 'Counterclockwise ↺'}`,
         m.wild_rank == null ? '' : ` · Rank ${m.wild_rank}`,
         m.stop_player != null ? ' · STOP active' : '')),
-    me ? node('div', { class: 'hand-area' }, node('div', { class: 'row split' }, title(`${me.name}'s hand`, 3),
+    handoff ? handoffPanel('four-color', next, 'hand') : null,
+    me ? node('div', { class: `hand-area ${state.revealAnimation ? 'reveal-animate' : ''}` }, node('div', { class: 'row split' }, title(`${me.name}'s hand`, 3),
       node('div', { class: 'row' },
         button(state.lastCard ? 'LAST CARD! ✓' : 'Call LAST CARD!', () => { state.lastCard = !state.lastCard; render(); },
           { class: state.lastCard ? 'primary' : 'secondary', disabled: !!choice || !!m.winner }),
@@ -251,7 +321,7 @@ function table() {
           { class: 'primary', disabled: state.selected.size !== choice.count })) : null,
       m.challenge_open && m.last_uncalled != null && m.players[m.last_uncalled].id !== me.id ?
         button('Challenge a missed LAST CARD!', () => task(() => perform(me.id, 'challenge')), { class: 'warning' }) : null)
-      : section('Game completed. Return to Home or review another game.'),
+      : handoff ? null : section('Game completed. Return to Home or review another game.'),
     node('div', { class: 'events' }, title('Table history', 3),
       ...m.events.slice(-5).reverse().map(e => node('div', { class: 'event' }, e.type.replace('_', ' '),
         e.player ? ` · ${e.player}` : '', e.card ? ` · ${e.card}` : ''))));
@@ -265,16 +335,9 @@ function fourfoldTable() {
       button('Check for revealed round', () => task(() => refreshMatch()), { class: 'primary' }),
       button('Return to online rooms', () => nav('online')));
   }
-  if (m.phase === 'plan' && (!state.ready || state.viewer !== next?.id)) {
-    return node('div', { class: 'narrow reveal' }, node('span', { class: 'eyebrow' }, `ROUND ${m.round} / 12`),
-      title(next ? `Pass the device to ${next.name}` : 'Waiting for orders', 1),
-      node('p', { class: 'muted' }, 'Your orders remain concealed until everyone is ready. Do not show your card choices to other players.'),
-      button('Reveal my planning area', () => task(async () => {
-        if (!next) return;
-        await refreshMatch(next.id); state.ready = true; state.plan = [];
-      }), { class: 'primary', disabled: !next }), button('Home', () => nav('home')));
-  }
-  const me = m.players.find(p => p.id === state.viewer);
+  const handoff = state.matchSource === 'local' && m.phase === 'plan' &&
+    (!state.ready || state.viewer !== next?.id);
+  const me = handoff ? null : m.players.find(p => p.id === state.viewer);
   const cp = state.plan.reduce((total, o) => total + (o.card.startsWith('ace-') ? m.targets[o.card.split('-')[1]] :
     { jack: 4, queen: 5, king: 8 }[o.card.split('-')[0]] || Number(o.card.split('-')[0])), 0);
   const treasury = state.plan.reduce((n, o) => n + o.treasury, 0);
@@ -283,13 +346,13 @@ function fourfoldTable() {
   async function addCard(card) {
     const suit = card.split('-')[1];
     const old = state.plan.find(o => o.card === card);
-    if (old) { state.plan = state.plan.filter(o => o !== old); render(); return; }
+    if (old) { state.plan = state.plan.filter(o => o !== old); state.justSelectedCard = null; render(); return; }
     state.plan = state.plan.filter(o => !o.card.endsWith('-' + suit));
     const order = { card, kind: 'claim', treasury: 0 };
     if (card.startsWith('jack-')) {
       order.target = await choose('Jack: target an opponent', m.players.filter(p => p.id !== me.id).map(p => [p.id, p.name]));
     }
-    state.plan.push(order); render();
+    state.plan.push(order); state.justSelectedCard = card; render();
   }
   return node('div', { class: 'fourfold-screen' },
     node('div', { class: 'row split' }, node('div', {}, node('span', { class: 'eyebrow' }, 'FOURFOLD MANDATE'),
@@ -303,9 +366,10 @@ function fourfoldTable() {
       node('p', {}, `${p.mp} MP · ${p.treasury} Treasury`),
       node('p', { class: 'minor' }, estates.map(s => `${suitIcon[s]} ${p.seals[s]}`).join('   ')),
       node('p', { class: 'minor' }, `${p.available_count} cards remaining${p.foundation ? ` · Foundation ${p.foundation.card}` : ''}`)))),
+    handoff ? handoffPanel('fourfold', next, 'planning area') : null,
     m.phase === 'complete' ? section(title(`Winners: ${m.players.filter(p => m.winners.includes(p.id)).map(p => p.name).join(' and ')}`, 2),
       button('Return home', () => nav('home'), { class: 'primary' })) :
-      me && !me.ready ? node('div', {}, section(node('div', { class: 'row split' }, title(`${me.name}: secret orders`, 2),
+      me && !me.ready ? node('div', { class: state.revealAnimation ? 'reveal-animate' : '' }, section(node('div', { class: 'row split' }, title(`${me.name}: secret orders`, 2),
         node('b', {}, `${cp} / 16 CP · ${treasury} / ${me.treasury} Treasury`)),
         node('p', { class: 'muted' }, 'Choose up to three different estates. Click a card to add or remove it. Secret choices lock when submitted.'),
         ...state.plan.map(o => node('div', { class: 'order-row' }, node('b', {}, o.card),
@@ -322,10 +386,10 @@ function fourfoldTable() {
           { class: 'primary', disabled: cp > 16 || treasury > me.treasury || state.plan.length > 3 })),
       section(title('Unspent cards', 2), node('div', { class: 'fourfold-hand' }, ...me.available.map(card => {
         const selected = state.plan.some(o => o.card === card);
-        const btn = button('', () => task(() => addCard(card)), { class: `fourfold-card ${selected ? 'selected' : ''}`,
+        const btn = button('', () => task(() => addCard(card)), { class: `fourfold-card ${selected ? 'selected' : ''} ${card === state.justSelectedCard ? 'just-selected' : ''}`,
           'aria-label': `Select ${card}`, 'aria-pressed': String(selected) });
         btn.append(fourfoldArt(card)); return btn;
-      })))) : section(node('p', {}, 'Your orders are locked. Pass the device to the next participant.')),
+      })))) : handoff ? null : section(node('p', {}, 'Your orders are locked. Pass the device to the next participant.')),
     node('div', { class: 'events' }, title('Completed rounds', 3),
       ...m.events.filter(e => e.type === 'round_resolved').slice(-4).reverse().map(e => section(
         node('b', {}, `Round ${e.round}`), node('p', { class: 'minor' }, e.awards.map(a =>
@@ -336,11 +400,16 @@ function settings() {
   function selection(name, options, field) {
     return node('label', { class: 'form-field' }, node('span', {}, name), node('select', {
       onChange: event => task(async () => { state.prefs = await api('/settings', { method: 'PUT', body: JSON.stringify({ [field]: event.target.value }) });
-        document.documentElement.dataset.theme = state.prefs.theme; }),
+        applyAppearance(); }),
     }, ...options.map(opt => node('option', { value: opt, selected: opt === p[field] ? '' : null }, opt))));
   }
   return node('div', { class: 'narrow' }, title('Settings', 1), section(title('Appearance & gameplay', 3),
     selection('Theme', ['dark', 'light', 'contrast'], 'theme'), selection('Default AI difficulty', ['easy', 'medium', 'hard', 'expert'], 'difficulty'),
+    node('label', { class: 'row motion-setting' }, node('input', { type: 'checkbox', checked: p.motion !== false,
+      onChange: event => task(async () => {
+        state.prefs = await api('/settings', { method: 'PUT', body: JSON.stringify({ motion: event.target.checked }) });
+        applyAppearance();
+      }) }), node('span', {}, 'Animate card flips and transitions')),
     node('p', { class: 'minor' }, 'Preferences are saved locally with SLAI’s database toolkit.')));
 }
 function stats() {
@@ -470,7 +539,7 @@ async function refreshAccount() {
   state.stats = await api('/stats');
   state.prefs = await api('/settings');
   state.setup.difficulty = state.prefs.difficulty;
-  document.documentElement.dataset.theme = state.prefs.theme;
+  applyAppearance();
   state.match = null;
 }
 function render() {
@@ -479,6 +548,8 @@ function render() {
     state.page === 'saved' ? node('div', {}, title('Saved matches', 1), ...state.saved.map(savedTile)) :
     state.page === 'stats' ? stats() : state.page === 'account' ? accountPage() : help();
   clear(root); root.append(shell(content));
+  state.revealAnimation = false;
+  state.justSelectedCard = null;
 }
 async function initialize() {
   try {
@@ -496,7 +567,7 @@ async function initialize() {
     }
     [state.catalog, state.saved, state.prefs, state.stats, state.profile] = await Promise.all([
       api('/catalog'), api('/matches'), api('/settings'), api('/stats'), api('/profile')]);
-    document.documentElement.dataset.theme = state.prefs.theme;
+    applyAppearance();
     state.setup.difficulty = state.prefs.difficulty;
     render();
   } catch (e) { root.replaceChildren(section(title('Unable to start Card Games'), node('p', {}, e.message))); }
