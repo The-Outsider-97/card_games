@@ -1,0 +1,36 @@
+name: Card Games tests
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Card Games
+        uses: actions/checkout@v4
+      - name: Checkout SLAI v2.4 toolkit
+        uses: actions/checkout@v4
+        with:
+          repository: The-Outsider-97/SLAI
+          ref: SLAI-v.2.4
+          path: slai-checkout
+          sparse-checkout: |
+            applications/tools
+          sparse-checkout-cone-mode: true
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Python rules and SLAI HTTP integration tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/slai-checkout:${{ github.workspace }}
+        run: python -m unittest discover -s tests -v
+      - name: JavaScript syntax
+        run: node --check src/client/app.js
