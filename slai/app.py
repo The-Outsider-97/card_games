@@ -106,7 +106,7 @@ def build_router():
         participants = payload.get("participants")
         if not isinstance(participants, list) or any(not isinstance(p, dict) for p in participants):
             raise BadRequest("Participants must be a list of player definitions")
-        return handle(app.service.create, owner(app, req), participants)
+        return handle(app.service.create, owner(app, req), participants, difficulty=payload.get("difficulty"))
 
     @router.route("GET", "/api/matches/{id}")
     def get_match(app, req):

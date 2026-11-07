@@ -1,7 +1,7 @@
 /* A small accessible DOM-only client; the Python match engine owns all rules. */
 const base = '/api';
 const state = { page: 'home', catalog: [], saved: [], stats: {}, prefs: {}, match: null, viewer: null,
-  selected: new Set(), lastCard: false, ready: false, setup: { humans: 1, ai: 2 },
+  selected: new Set(), lastCard: false, ready: false, setup: { humans: 1, ai: 2, difficulty: 'medium' },
   account: { username: 'Guest', status: 'guest', available: 'false' }, authMode: 'login' };
 const root = document.getElementById('app');
 
@@ -107,6 +107,10 @@ function setup() {
     node('p', { class: 'muted' }, 'Four-Color · 2–8 players · 7 cards each · no stacking'),
     section(title('Players', 3), node('div', { class: 'form-grid' }, numberInput('Local human players', 'humans', 8), numberInput('AI opponents', 'ai', 7)),
       node('p', { class: 'minor' }, `Total ${humans + ai} players. First seat is always human.`),
+      node('label', { class: 'form-field' }, node('span', {}, 'SLAI opponent difficulty'),
+        node('select', { onChange: event => { state.setup.difficulty = event.target.value; } },
+          ...['easy', 'medium', 'hard', 'expert'].map(d => node('option', { value: d,
+            ...(d === state.setup.difficulty ? { selected: '' } : {}) }, d)))),
       node('div', { class: 'row' }, button('Back', () => nav('games')),
         button('Start match', () => task(async () => {
           if (humans + ai < 2 || humans + ai > 8) throw new Error('Choose between 2 and 8 players.');
@@ -114,7 +118,7 @@ function setup() {
             ...Array.from({ length: humans }, (_, i) => ({ id: `human${i + 1}`, name: `Player ${i + 1}`, kind: 'human' })),
             ...Array.from({ length: ai }, (_, i) => ({ id: `ai${i + 1}`, name: `SLAI ${i + 1}`, kind: 'ai' })),
           ];
-          state.match = await api('/matches', { method: 'POST', body: JSON.stringify({ game: 'four-color', participants }) });
+          state.match = await api('/matches', { method: 'POST', body: JSON.stringify({ game: 'four-color', participants, difficulty: state.setup.difficulty }) });
           state.viewer = null; state.ready = false; state.page = 'table';
           state.saved = await api('/matches'); state.stats = await api('/stats');
         }), { class: 'primary' }))));
@@ -263,6 +267,7 @@ async function refreshAccount() {
   state.saved = await api('/matches');
   state.stats = await api('/stats');
   state.prefs = await api('/settings');
+  state.setup.difficulty = state.prefs.difficulty;
   document.documentElement.dataset.theme = state.prefs.theme;
   state.match = null;
 }
@@ -278,6 +283,7 @@ async function initialize() {
     [state.catalog, state.saved, state.prefs, state.account, state.stats] = await Promise.all([
       api('/catalog'), api('/matches'), api('/settings'), api('/account'), api('/stats')]);
     document.documentElement.dataset.theme = state.prefs.theme;
+    state.setup.difficulty = state.prefs.difficulty;
     render();
   } catch (e) { root.replaceChildren(section(title('Unable to start Card Games'), node('p', {}, e.message))); }
 }

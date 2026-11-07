@@ -105,10 +105,15 @@ class CardGamesService:
              "image": "/assets/symbols/cover.jpg", "players": "Variant pending", "status": "rules-pending", "asset_set": "symbols"},
         ]
 
-    def create(self, owner: str, participants: list[dict[str, str]], seed: int | None = None) -> dict[str, Any]:
+    def create(self, owner: str, participants: list[dict[str, str]], seed: int | None = None,
+               difficulty: str | None = None) -> dict[str, Any]:
         if not owner or len(owner) > 80:
             raise GameError("Invalid owner")
+        difficulty = difficulty or self.preferences(owner)["difficulty"]
+        if difficulty not in ("easy", "medium", "hard", "expert"):
+            raise GameError("Invalid AI difficulty")
         match = Match.new(participants, seed=seed)
+        match.state["ai_difficulty"] = difficulty
         with self._lock, self.db.transaction():
             self._save(owner, match)
         return match.view(participants[0]["id"])
@@ -198,6 +203,7 @@ class CardGamesService:
             current = match.state["players"][match.state["current"]]
             if current["kind"] != "ai":
                 return
+            self.agent.difficulty = match.state.get("ai_difficulty", "medium")
             action, kwargs = self.agent.move(match, current["id"])
             match.act(current["id"], action, **kwargs)
         # A bounded decision loop prevents long AI-only games from monopolizing an HTTP request.

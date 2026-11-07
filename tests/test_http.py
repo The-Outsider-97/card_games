@@ -52,8 +52,9 @@ class SharedServerTests(unittest.TestCase):
         self.assertEqual(catalog[0]["status"], "playable")
         self.assertEqual(catalog[1]["status"], "rules-pending")
         self.assertEqual(self.request("/api/assets")[0]["faces"], 119)
-        match = self.request("/api/matches", {"participants": [
+        match = self.request("/api/matches", {"difficulty": "hard", "participants": [
             {"id": "me", "name": "Me", "kind": "human"}, {"id": "bot", "name": "SLAI", "kind": "ai"}]})
+        self.assertEqual(match["ai_difficulty"], "hard")
         self.assertEqual(match["draw_count"], 104)
         self.assertEqual(len(match["players"][0]["hand"]), 7)
         self.assertEqual(len(match["players"][1]["hand"]), 0)

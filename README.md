@@ -12,7 +12,7 @@ A local-first desktop-style launcher for original card games, powered by SLAI's 
 - SQLite match recovery and preferences through `applications.tools.database.Database`.
 - SLAI's hardened loopback server and shared CSS (`applications/tools`).
 - Account registration and login **when** `src.functions.auth.AuthService` is available; guest play works without it.
-- Optional SLAI Planning Agent adapter. If it cannot provide a compatible structured card move, the game explicitly uses a legal heuristic fallback; that fallback is **not** an SLAI decision.
+- Optional CardGameAgent specialization of SLAI `BaseAgent` with a structured legal-action contract. If SLAI is unavailable, the game explicitly uses a legal heuristic fallback; that fallback is **not** an SLAI decision.
 
 ## Requirements
 
@@ -70,7 +70,7 @@ The current launcher registers Four-Color as playable. Fourfold and the symbols 
 - The PDF's Cycle rule is **proposed, not approved**. This prototype currently implements that proposed rotation literally; physical-production approval and playtesting are still required.
 - `cards/symbols/` has a different inventory, including no neutral cards or Reverse art. It is **not** silently treated as a complete interchangeable 119-card deck.
 - `cards/fourfold/` has potentially inconsistent filenames and no authoritative playable rules in the repository. Fourfold is not advertised as playable.
-- The AI bridge can fall back to simple deterministic legal choices. Full SLAI agent decision integration, strategic skill calibration, and performance evaluation remain open.
+- The AI bridge attempts a game-specific SLAI BaseAgent at decision time and can fall back to deterministic legal choices. The full agent runtime was unavailable in sparse-toolkit QA, so real SLAI execution, strategic skill calibration, and performance evaluation remain open.
 - Online multiplayer, remote accounts and live synchronization are not implemented. The server is local-only.
 - Guest and hot-seat modes assume trusted users of one device. Hand-hiding screens are a privacy courtesy, not a security boundary between hostile local users.
 - Account login depends on the full SLAI auth subsystem and its configuration. Account refresh/verification UI and profile editing are not yet complete.
