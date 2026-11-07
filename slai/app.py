@@ -34,14 +34,19 @@ def build_router():
 
     router = Router()
 
-    def cookie_token(req):
+    def cookie_token(req, name="cg_account"):
         jar = SimpleCookie()
         try:
             jar.load(req.headers.get("cookie", ""))
         except Exception:
             return None
-        token = jar.get("cg_account")
+        token = jar.get(name)
         return token.value if token else None
+
+    def session_cookies(access, refresh):
+        # Strict same-site cookies + the toolkit's mutation header mitigate CSRF.
+        return [f"cg_account={access}; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600",
+                f"cg_refresh={refresh}; Path=/api/account; HttpOnly; SameSite=Strict; Max-Age=1209600"]
 
     def owner(app, req):
         return app.service.account(cookie_token(req))["owner"]
@@ -64,7 +69,9 @@ def build_router():
 
     @router.route("GET", "/api/health")
     def health(app, req):
-        return {"status": "ready", "ai": app.service.agent.status, "auth": app.service.auth_status, "persistence": "sqlite"}
+        return {"status": "ready", "ai": app.service.agent.status,
+                "ai_diagnostic": app.service.agent.last_diagnostic,
+                "auth": app.service.auth_status, "persistence": "sqlite"}
 
     @router.route("GET", "/api/account")
     def account(app, req):
@@ -78,17 +85,36 @@ def build_router():
     @router.route("POST", "/api/account/login")
     def login(app, req):
         payload = req.json()
-        token, profile = handle(app.service.login, payload.get("username"), payload.get("password"))
+        token, refresh_token, profile = handle(app.service.login, payload.get("username"), payload.get("password"))
         response = ok(profile)
-        response.cookies.append(f"cg_account={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600")
+        response.cookies.extend(session_cookies(token, refresh_token))
+        return response
+
+    @router.route("POST", "/api/account/refresh")
+    def refresh(app, req):
+        access, refresh_token, profile = handle(app.service.refresh, cookie_token(req, "cg_refresh"))
+        response = ok(profile)
+        response.cookies.extend(session_cookies(access, refresh_token))
         return response
 
     @router.route("POST", "/api/account/logout")
     def logout(app, req):
-        handle(app.service.logout, cookie_token(req))
+        handle(app.service.logout, cookie_token(req), cookie_token(req, "cg_refresh"))
         response = ok({"status": "guest"})
         response.cookies.append("cg_account=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
+        response.cookies.append("cg_refresh=; Path=/api/account; HttpOnly; SameSite=Strict; Max-Age=0")
         return response
+
+    @router.route("GET", "/api/profile")
+    def profile(app, req):
+        return app.service.profile(owner(app, req))
+
+    @router.route("PUT", "/api/profile")
+    def update_profile(app, req):
+        who = owner(app, req)
+        if who == "guest":
+            raise BadRequest("Sign in to edit your profile")
+        return handle(app.service.profile, who, req.json())
 
     @router.route("GET", "/api/matches")
     def matches(app, req):
@@ -101,12 +127,13 @@ def build_router():
     @router.route("POST", "/api/matches")
     def new_match(app, req):
         payload = req.json()
-        if payload.get("game", "four-color") != "four-color":
+        if payload.get("game", "four-color") not in ("four-color", "fourfold"):
             raise BadRequest("Game rules are not yet available")
         participants = payload.get("participants")
         if not isinstance(participants, list) or any(not isinstance(p, dict) for p in participants):
             raise BadRequest("Participants must be a list of player definitions")
-        return handle(app.service.create, owner(app, req), participants, difficulty=payload.get("difficulty"))
+        return handle(app.service.create, owner(app, req), participants,
+                      difficulty=payload.get("difficulty"), game=payload.get("game", "four-color"))
 
     @router.route("GET", "/api/matches/{id}")
     def get_match(app, req):

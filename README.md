@@ -2,17 +2,19 @@
 
 A local-first desktop-style launcher for original card games, powered by SLAI's shared application toolkit.
 
-**Status: working Four-Color prototype; not a complete production release.** The shared card registry, account integration, online play and other games need further work (see limitations).
+**Status: two playable rules engines, local account/profile support and a separate self-hosted online room service. Not yet independently production-certified.**
 
 ## Currently available
 
 - Four-Color v1.0 prototype: 119-face color deck, 2–8 seats, documented action rules, turn validation, draw/recycle, one-card turns, pending selections, last-card challenge, winner detection.
+- **Fourfold Mandate First Edition v1.0**: 2–6 players, 56 cards per player, 12 rounds of simultaneously committed orders, exact-match targets, CP/Treasury economics, Foundations, Jack/Queen/King abilities, estate contests, seals, era rewards, set bonuses and tie breakers. See [Fourfold rules and artwork register](doc/FOURFOLD.md).
 - Local human and AI seats, including mixed matches and hot-seat privacy screens.
 - Browser launcher, game cards, setup, table, settings, recent matches and history.
 - SQLite match recovery and preferences through `applications.tools.database.Database`.
 - SLAI's hardened loopback server and shared CSS (`applications/tools`).
-- Account registration and login **when** `src.functions.auth.AuthService` is available; guest play works without it.
-- Optional CardGameAgent specialization of SLAI `BaseAgent` with a structured legal-action contract. If SLAI is unavailable, the game explicitly uses a legal heuristic fallback; that fallback is **not** an SLAI decision.
+- Account registration/login with SLAI AuthService, refresh-token rotation, logout, editable profile display names/avatars and guest play. Full auth requires SLAI's optional auth dependencies.
+- SLAI `BaseAgent` specialization for both games. Structured decisions are revalidated by the rules engine, bounded by a decision timeout, with diagnostics for any fallback.
+- Optional separately hosted network room service for human players: one-use invitations, per-seat secret tokens, server-controlled actions, idempotent revisions, reconnection and remote table polling.
 
 ## Requirements
 
@@ -40,6 +42,19 @@ python -m applications.card_games --port 8774
 
 The launcher prints a one-time URL; open it to establish the local session cookie. The server refuses non-loopback network interfaces. Do not expose it directly to the internet.
 
+### Online rooms
+
+Run the **separate** network room service; never expose the privileged SLAI loopback server. For testing locally:
+
+```powershell
+cd G:\GAIA\AI\card_games
+python -m slai.online --host 127.0.0.1 --port 8775 --data .\rooms.sqlite3 --allowed-origin http://127.0.0.1:8774
+```
+
+Launch the regular Card Games app and choose **Online rooms**, then create or join using a one-time invitation. The host generates the invitation for each seat. Room participants use seat-specific bearer capabilities, not their SLAI local access cookie. The exact browser origin must match `--allowed-origin`.
+
+For internet-hosted rooms, configure a real hostname, `--tls-cert` and `--tls-key`; a non-loopback listener **refuses to start without TLS**. Provision firewalls, DNS, backups, certificate renewal, monitoring and user-facing service policies before public deployment. This is a self-hosted room service, not a hosted global matchmaking service or a cloud account provider.
+
 Other options: `--no-browser`, `--data-dir`, `--host` (loopback only), `--token` (tests only).
 
 ## Tests
@@ -51,29 +66,41 @@ python -m unittest discover -s tests -v
 
 For tests of the actual shared SLAI HTTP toolkit, add the SLAI checkout root to `PYTHONPATH` (or run from a development environment where `applications.tools` is importable). Tests without it will skip the shared-server integration module.
 
+AI benchmark (controlled scripted matches, not a scientific human balance study):
+
+```powershell
+$env:PYTHONPATH='G:\GAIA\AI\SLAI'
+python -m utils.benchmark_ai --game fourfold --games 20 --seed 41
+python -m utils.benchmark_ai --game four-color --games 20 --seed 7
+```
+
 ## Project boundaries
 
 | Path | Responsibility |
 | --- | --- |
 | `app/game.py` | Authoritative Four-Color rules and serializable match state |
+| `app/fourfold.py` | Independent authoritative Fourfold v1.0 round resolver |
 | `app/service.py` | SQLite persistence, sessions, preferences and account adapter |
 | `slai/app.py` | Shared SLAI loopback HTTP host and routes |
 | `slai/bridge/agents.py` | Optional structured SLAI card decision adapter and legal fallback |
+| `slai/online.py` | Independent network room authority; TLS-required remote access |
 | `src/client/` | Launcher and interactive web client |
 | `cards/` | Original card art collections; no game mechanics inferred from images |
 
-The current launcher registers Four-Color as playable. Fourfold and the symbols variant are shown as rules pending.
+The launcher registers **Four-Color and Fourfold** as playable; the symbols variant remains unavailable pending missing faces and an approved rules mapping.
 
 ## Prototype rules and known limitations
 
 - Four-Color mechanics are based on `four_color_card_game_rules_v1_0.pdf` supplied with the development request. See [rules decision register](doc/FOUR_COLOR.md).
 - The PDF's Cycle rule is **proposed, not approved**. This prototype currently implements that proposed rotation literally; physical-production approval and playtesting are still required.
-- `cards/symbols/` has a different inventory, including no neutral cards or Reverse art. It is **not** silently treated as a complete interchangeable 119-card deck.
-- `cards/fourfold/` has potentially inconsistent filenames and no authoritative playable rules in the repository. Fourfold is not advertised as playable.
-- The AI bridge attempts a game-specific SLAI BaseAgent at decision time and can fall back to deterministic legal choices. The full agent runtime was unavailable in sparse-toolkit QA, so real SLAI execution, strategic skill calibration, and performance evaluation remain open.
-- Online multiplayer, remote accounts and live synchronization are not implemented. The server is local-only.
+- `cards/symbols/` is 15 faces short of a canonical Four-Color-equivalent 119-face deck: four Reverse and eleven neutral actions. No suit-to-color correspondence or distinct rules have been approved. See [reconciliation](doc/FOUR_COLOR.md).
+- `cards/fourfold/` has duplicate Spades King naming and lacks a King of Hearts image. The digital game uses the logical 56-card deck independently of artwork and shows a labeled missing-image placeholder.
+- Live SLAI BaseAgent specialization and timed calls were exercised against the SLAI v2.4 checkout. Benchmarks compare scripted policies over controlled matches; no claims of optimal strategy or human play balance are made.
+- The online room service uses explicit invitations and authenticated seat tokens but has **no global identity provider**, ranked matchmaking, spectators, or deployed cloud hosting. Browser clients poll rather than maintain a WebSocket.
 - Guest and hot-seat modes assume trusted users of one device. Hand-hiding screens are a privacy courtesy, not a security boundary between hostile local users.
-- Account login depends on the full SLAI auth subsystem and its configuration. Account refresh/verification UI and profile editing are not yet complete.
-- Client uses plain JavaScript rather than compiled strict TypeScript, and rich animations and visual end-to-end browser testing are incomplete.
+- Account login depends on the full SLAI auth subsystem and its optional dependencies (in the verification container, `phonenumbers` was unavailable). The UI offers signup, login, refresh, logout and profile editing. Email verification and credential recovery remain SLAI-auth deployment concerns; password changes are not exposed until the shared auth service provides a supported API.
+- Client uses plain JavaScript rather than compiled strict TypeScript. Rich animations and independent visual browser end-to-end QA remain incomplete; this verification environment's browser cannot reach its isolated local test server.
 
 No balance or production-readiness claim is made without empirical playtests, security verification, and more extensive integration testing.
+
+See the [security and release-verification register](doc/SECURITY.md) for verified protections and the remaining release blockers.

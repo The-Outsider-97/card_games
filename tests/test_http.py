@@ -50,7 +50,8 @@ class SharedServerTests(unittest.TestCase):
     def test_create_view_and_reject_stale_revision(self):
         catalog = self.request("/api/catalog")
         self.assertEqual(catalog[0]["status"], "playable")
-        self.assertEqual(catalog[1]["status"], "rules-pending")
+        self.assertEqual(catalog[1]["status"], "playable")
+        self.assertEqual(catalog[2]["status"], "rules-pending")
         self.assertEqual(self.request("/api/assets")[0]["faces"], 119)
         match = self.request("/api/matches", {"difficulty": "hard", "participants": [
             {"id": "me", "name": "Me", "kind": "human"}, {"id": "bot", "name": "SLAI", "kind": "ai"}]})
@@ -58,6 +59,7 @@ class SharedServerTests(unittest.TestCase):
         self.assertEqual(match["draw_count"], 104)
         self.assertEqual(len(match["players"][0]["hand"]), 7)
         self.assertEqual(len(match["players"][1]["hand"]), 0)
+        self.assertEqual(len(self.request(f"/api/matches/{match['id']}?viewer=bot")["players"][1]["hand"]), 0)
         result = self.request(f"/api/matches/{match['id']}/actions", {
             "actor": "me", "revision": 0, "command": "draw", "args": {}})
         self.assertGreaterEqual(result["revision"], 1)
@@ -67,6 +69,31 @@ class SharedServerTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 400)
         self.assertEqual(len(self.request("/api/matches")), 1)
         self.assertEqual(self.request("/api/stats")["total"], 1)
+
+    def test_fourfold_http_round_and_concealed_orders(self):
+        match = self.request("/api/matches", {"game": "fourfold", "participants": [
+            {"id": "alice", "kind": "human"}, {"id": "bob", "kind": "human"}]})
+        self.assertEqual(match["round"], 1)
+        first = self.request(f"/api/matches/{match['id']}/actions", {
+            "actor": "alice", "command": "submit", "revision": 0,
+            "args": {"orders": [{"card": "04-hearts"}]}})
+        self.assertTrue(first["players"][0]["ready"])
+        concealed = self.request(f"/api/matches/{match['id']}?viewer=bob")
+        self.assertNotIn("orders", concealed["players"][0])
+        self.request(f"/api/matches/{match['id']}/actions", {
+            "actor": "bob", "command": "submit", "revision": 1,
+            "args": {"orders": [{"card": "04-hearts"}]}})
+        self.assertEqual(self.request(f"/api/matches/{match['id']}")["round"], 2)
+
+    def test_fourfold_slai_ai_commits_without_exposing_its_order(self):
+        match = self.request("/api/matches", {"game": "fourfold", "participants": [
+            {"id": "me", "kind": "human"}, {"id": "agent", "kind": "ai"}]})
+        self.assertTrue(match["players"][1]["ready"])
+        self.assertNotIn("orders", match["players"][1])
+        result = self.request(f"/api/matches/{match['id']}/actions", {
+            "actor": "me", "command": "submit", "revision": match["revision"], "args": {"orders": []}})
+        self.assertEqual(result["round"], 2)
+        self.assertTrue(result["players"][1]["ready"])
 
     def test_settings_roundtrip_and_security_marker(self):
         settings = self.request("/api/settings")

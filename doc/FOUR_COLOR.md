@@ -32,4 +32,10 @@ Source: user-supplied `four_color_card_game_rules_v1_0.pdf`, prototype edition o
 4. Supply an authoritative symbols-based rules/deck manifest where it differs from the 119-card color deck.
 5. Conduct the PDF's proposed 12+ structured playtests (2, 3, 4, and 6–8 players), recording duration, action rate, forced draws, and perceived balance.
 
+## Symbols deck reconciliation (7 November 2026)
+
+The `cards/symbols/` family is reusable art, **not a game**. The verified inventory has 104 playable face images plus the cover: four suits, 0–13, A/J/Q/K, +1/+2/+4/+5, Cycle, Skip, Stop and Wild. There are no Reverse faces and no neutral faces. A canonical Four-Color-equivalent deck would require four missing Reverse faces and eleven neutral action faces (+2, +4, Cycle, Reverse, Skip, Stop, Wild, Equality, Verdict, Swap, Steal), and a designer-approved correspondence between suits and colors.
+
+The registry exposes this exact fifteen-face deficit and the pending semantics. No silently altered 104-card ruleset is registered as playable; both the mapping and any intentionally different symbols-game rules need approval before enabling a symbols variant. Original images are retained.
+
 These are outstanding product decisions, not completed empirical validations.
