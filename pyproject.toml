@@ -1,1 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
+[project]
+name = "slai-card-games"
+version = "0.2.0.dev0"
+description = "Original tabletop card games for the SLAI application ecosystem"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+
+[tool.setuptools]
+packages = ["app", "slai", "slai.bridge"]
