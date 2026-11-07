@@ -1,2 +1,2 @@
-# fourfold
-A card game of calculated commitment
+# Card Games
+Original fun card games for everyone
