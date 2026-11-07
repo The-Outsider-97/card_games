@@ -1,8 +1,10 @@
 /* A small accessible DOM-only client; the Python match engine owns all rules. */
 const base = '/api';
 const state = { page: 'home', catalog: [], saved: [], stats: {}, prefs: {}, match: null, viewer: null,
-  selected: new Set(), lastCard: false, ready: false, setup: { humans: 1, ai: 2, difficulty: 'medium' },
-  account: { username: 'Guest', status: 'guest', available: 'false' }, authMode: 'login' };
+  selected: new Set(), lastCard: false, ready: false, plan: [],
+  setup: { game: 'four-color', humans: 1, ai: 2, difficulty: 'medium' },
+  account: { username: 'Guest', status: 'guest', available: 'false' }, profile: { display_name: 'Guest', avatar: 'initials' },
+  authMode: 'login', remote: null, invite: null, matchSource: 'local' };
 const root = document.getElementById('app');
 
 function node(tag, attrs = {}, ...children) {
@@ -36,19 +38,35 @@ async function api(path, options = {}) {
   if (!response.ok || !body.ok) throw new Error(body.error?.message || `HTTP ${response.status}`);
   return body.data;
 }
+async function remoteApi(path, options = {}) {
+  if (!state.remote) throw new Error('Connect to an online room first.');
+  const headers = { ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+    ...(state.remote.token ? { Authorization: `Bearer ${state.remote.token}` } : {}), ...options.headers };
+  const response = await fetch(state.remote.server + path, { ...options, headers });
+  const body = await response.json();
+  if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`);
+  return body.data;
+}
 async function task(action) { try { await action(); render(); } catch (e) { toast(e.message || 'Unexpected error'); } }
 function toast(message) {
   const item = node('div', { class: 'toast', role: 'alert' }, message);
   document.body.append(item);
   setTimeout(() => item.remove(), 4500);
 }
-function nav(page) { state.page = page; state.ready = false; state.selected.clear(); render(); }
+function nav(page) {
+  if (page === 'online' && state.remote?.room) {
+    task(async () => { state.match = await remoteApi(`/rooms/${state.remote.room}`);
+      state.viewer = state.remote.seat; state.matchSource = 'remote'; state.page = 'online'; });
+    return;
+  }
+  state.page = page; state.ready = false; state.selected.clear(); render();
+}
 function shell(content) {
   const app = node('div', { class: 'shell' });
   const sidebar = node('aside', { class: 'sidebar' },
     node('div', { class: 'brand' }, node('div', { class: 'brand-icon' }, 'CG'), node('div', {}, title('Card Games', 2), node('small', {}, 'POWERED BY SLAI'))),
     node('div', { class: 'nav-list' }, ...[
-      ['home', '⌂', 'Home'], ['games', '▦', 'Games'], ['saved', '◷', 'Continue game'],
+      ['home', '⌂', 'Home'], ['games', '▦', 'Games'], ['online', '◇', 'Online rooms'], ['saved', '◷', 'Continue game'],
       ['stats', '◫', 'Statistics'], ['settings', '⚙', 'Settings'], ['account', '♙', 'Account'], ['help', '?', 'How to play'],
     ].map(([id, glyph, label]) => button(`${glyph}   ${label}`, () => nav(id), { class: `nav-button ${state.page === id ? 'active' : ''}` }))),
     button(state.account.username, () => nav('account'), { class: 'account-button' }),
@@ -56,7 +74,7 @@ function shell(content) {
       node('div', {}, node('b', {}, state.account.username), node('small', {}, state.account.status === 'guest' ? 'Local guest' : 'Signed in'))));
   const main = node('main', { class: 'main' },
     node('header', { class: 'topbar' }, node('div', { class: 'breadcrumb' }, 'SLAI / ', state.page === 'table' ? 'Playing' : state.page),
-      node('div', { class: 'user-status' }, node('span', { class: 'status-dot' }), 'Local & private')),
+      node('div', { class: 'user-status' }, node('span', { class: 'status-dot' }), state.matchSource === 'remote' ? 'Online room' : 'Local & private')),
     node('div', { class: 'content' }, content));
   app.append(sidebar, main);
   return app;
@@ -69,7 +87,9 @@ function gameTile(item) {
       node('span', { class: `chip ${playable ? 'green' : 'muted'}` }, playable ? 'PLAYABLE' :
         item.status === 'assets-missing' ? 'ASSETS MISSING' : 'RULES PENDING'),
       node('span', { class: 'minor' }, item.players)), title(item.title, 3),
-      node('p', {}, item.description), button(playable ? 'Play now' : 'Unavailable', () => { if (playable) nav('setup'); },
+      node('p', {}, item.description), button(playable ? 'Play now' : 'Unavailable', () => {
+        if (playable) { state.setup.game = item.id; state.setup.ai = item.id === 'fourfold' ? 1 : 2; nav('setup'); }
+      },
         { class: 'primary full', disabled: !playable })));
 }
 function home() {
@@ -89,7 +109,7 @@ function savedTile(item) {
     node('p', { class: 'minor' }, item.completed ? `Finished · winner ${item.winner}` : `In progress · move ${item.revision}`)),
     button(item.completed ? 'Review' : 'Continue', () => task(async () => {
       state.match = await api(`/matches/${item.id}?viewer=`);
-      state.viewer = null; state.page = 'table'; state.ready = false;
+      state.viewer = null; state.plan = []; state.page = 'table'; state.ready = false; state.matchSource = 'local';
     }), { class: 'primary' })));
 }
 function games() { return node('div', {}, node('span', { class: 'eyebrow' }, 'THE COLLECTION'),
@@ -97,6 +117,8 @@ function games() { return node('div', {}, node('span', { class: 'eyebrow' }, 'TH
   node('div', { class: 'tiles' }, ...state.catalog.map(gameTile))); }
 function setup() {
   const humans = state.setup.humans, ai = state.setup.ai;
+  const fourfold = state.setup.game === 'fourfold';
+  const limit = fourfold ? 6 : 8;
   function numberInput(label, key, max) {
     return node('label', { class: 'form-field' }, node('span', {}, label), node('input', {
       type: 'number', min: key === 'humans' ? '1' : '0', max: String(max), value: String(state.setup[key]),
@@ -104,8 +126,8 @@ function setup() {
     }));
   }
   return node('div', { class: 'narrow' }, node('span', { class: 'eyebrow' }, 'NEW MATCH'), title('Set the table', 1),
-    node('p', { class: 'muted' }, 'Four-Color · 2–8 players · 7 cards each · no stacking'),
-    section(title('Players', 3), node('div', { class: 'form-grid' }, numberInput('Local human players', 'humans', 8), numberInput('AI opponents', 'ai', 7)),
+    node('p', { class: 'muted' }, fourfold ? 'Fourfold Mandate · 2–6 players · 12 rounds · 16 CP each round' : 'Four-Color · 2–8 players · 7 cards each · no stacking'),
+    section(title('Players', 3), node('div', { class: 'form-grid' }, numberInput('Local human players', 'humans', limit), numberInput('AI opponents', 'ai', limit - 1)),
       node('p', { class: 'minor' }, `Total ${humans + ai} players. First seat is always human.`),
       node('label', { class: 'form-field' }, node('span', {}, 'SLAI opponent difficulty'),
         node('select', { onChange: event => { state.setup.difficulty = event.target.value; } },
@@ -113,17 +135,24 @@ function setup() {
             ...(d === state.setup.difficulty ? { selected: '' } : {}) }, d)))),
       node('div', { class: 'row' }, button('Back', () => nav('games')),
         button('Start match', () => task(async () => {
-          if (humans + ai < 2 || humans + ai > 8) throw new Error('Choose between 2 and 8 players.');
+          if (humans + ai < 2 || humans + ai > limit) throw new Error(`Choose between 2 and ${limit} players.`);
           const participants = [
             ...Array.from({ length: humans }, (_, i) => ({ id: `human${i + 1}`, name: `Player ${i + 1}`, kind: 'human' })),
             ...Array.from({ length: ai }, (_, i) => ({ id: `ai${i + 1}`, name: `SLAI ${i + 1}`, kind: 'ai' })),
           ];
-          state.match = await api('/matches', { method: 'POST', body: JSON.stringify({ game: 'four-color', participants, difficulty: state.setup.difficulty }) });
-          state.viewer = null; state.ready = false; state.page = 'table';
+          state.match = await api('/matches', { method: 'POST', body: JSON.stringify({ game: state.setup.game, participants, difficulty: state.setup.difficulty }) });
+          state.viewer = null; state.ready = false; state.plan = []; state.page = 'table'; state.matchSource = 'local';
           state.saved = await api('/matches'); state.stats = await api('/stats');
         }), { class: 'primary' }))));
 }
 function image(card, className = '') { return node('img', { src: `/assets/colors/${card}.jpg`, class: className, alt: card.replace('-', ' '), loading: 'lazy' }); }
+function fourfoldArt(card) {
+  const aliases = { 'queen-hearts': 'queen-heart', 'queen-spades': 'queen-spade', 'king-spades': 'king-spade' };
+  if (card === 'king-hearts') return node('span', { class: 'art-fallback', role: 'img', 'aria-label': 'King of Hearts artwork missing' }, 'K ♥');
+  const el = node('img', { src: `/assets/fourfold/${aliases[card] || card}.jpg`, alt: card.replace('-', ' '), loading: 'lazy' });
+  el.addEventListener('error', () => el.replaceWith(node('span', { class: 'art-fallback' }, card)));
+  return el;
+}
 async function choose(message, options) {
   return new Promise(resolve => {
     const shade = node('div', { class: 'modal-shade' });
@@ -134,13 +163,26 @@ async function choose(message, options) {
   });
 }
 async function refreshMatch(viewer = state.viewer) {
+  if (state.matchSource === 'remote' && state.remote) {
+    state.match = await remoteApi(`/rooms/${state.remote.room}`);
+    state.viewer = state.remote.seat;
+    return;
+  }
   state.match = await api(`/matches/${state.match.id}?viewer=${encodeURIComponent(viewer || '')}`);
   state.viewer = viewer;
 }
 async function perform(actor, command, args = {}) {
   const match = state.match;
+  if (state.matchSource === 'remote' && state.remote) {
+    if (actor !== state.remote.seat) throw new Error('You may act only for your own online seat.');
+    const reply = await remoteApi(`/rooms/${state.remote.room}/actions`, { method: 'POST',
+      body: JSON.stringify({ command, args, revision: match.revision, action_id: crypto.randomUUID() }) });
+    state.match = reply.state; state.viewer = state.remote.seat; state.plan = []; state.selected.clear();
+    state.lastCard = false; state.ready = true;
+    return;
+  }
   await api(`/matches/${match.id}/actions`, { method: 'POST', body: JSON.stringify({ actor, command, args, revision: match.revision }) });
-  state.selected.clear(); state.lastCard = false; state.ready = false;
+  state.selected.clear(); state.lastCard = false; state.ready = false; state.plan = [];
   await refreshMatch(null);
 }
 async function playCard(card) {
@@ -157,8 +199,15 @@ async function playCard(card) {
 function table() {
   const m = state.match;
   if (!m) return section('No match selected.');
+  if (m.game === 'fourfold') return fourfoldTable();
   const pendingId = m.outstanding?.find(x => m.players.find(p => p.id === x.player)?.kind === 'human')?.player;
   const current = m.players[m.current];
+  if (state.matchSource === 'remote' && !m.winner && state.remote.seat !== (pendingId || current.id)) {
+    return section(title('Waiting for the next turn', 2),
+      node('p', {}, `${current.name} is playing. Your hand is private.`),
+      button('Check for opponent moves', () => task(() => refreshMatch()), { class: 'primary' }),
+      button('Return to online rooms', () => nav('online')));
+  }
   const nextId = pendingId || (current.kind === 'human' ? current.id : null);
   if (!m.winner && (!state.ready || state.viewer !== nextId)) {
     return node('div', { class: 'narrow reveal' }, node('span', { class: 'eyebrow' }, 'PRIVATE TURN'),
@@ -207,6 +256,81 @@ function table() {
       ...m.events.slice(-5).reverse().map(e => node('div', { class: 'event' }, e.type.replace('_', ' '),
         e.player ? ` · ${e.player}` : '', e.card ? ` · ${e.card}` : ''))));
 }
+function fourfoldTable() {
+  const m = state.match;
+  const next = state.matchSource === 'remote' ? m.players.find(p => p.id === state.remote.seat && !p.ready) :
+    m.players.find(p => p.kind === 'human' && !p.ready);
+  if (state.matchSource === 'remote' && m.phase === 'plan' && !next) {
+    return section(title(`Round ${m.round}: orders locked`, 2), node('p', {}, 'Waiting for the remaining players to submit their sealed orders.'),
+      button('Check for revealed round', () => task(() => refreshMatch()), { class: 'primary' }),
+      button('Return to online rooms', () => nav('online')));
+  }
+  if (m.phase === 'plan' && (!state.ready || state.viewer !== next?.id)) {
+    return node('div', { class: 'narrow reveal' }, node('span', { class: 'eyebrow' }, `ROUND ${m.round} / 12`),
+      title(next ? `Pass the device to ${next.name}` : 'Waiting for orders', 1),
+      node('p', { class: 'muted' }, 'Your orders remain concealed until everyone is ready. Do not show your card choices to other players.'),
+      button('Reveal my planning area', () => task(async () => {
+        if (!next) return;
+        await refreshMatch(next.id); state.ready = true; state.plan = [];
+      }), { class: 'primary', disabled: !next }), button('Home', () => nav('home')));
+  }
+  const me = m.players.find(p => p.id === state.viewer);
+  const cp = state.plan.reduce((total, o) => total + (o.card.startsWith('ace-') ? m.targets[o.card.split('-')[1]] :
+    { jack: 4, queen: 5, king: 8 }[o.card.split('-')[0]] || Number(o.card.split('-')[0])), 0);
+  const treasury = state.plan.reduce((n, o) => n + o.treasury, 0);
+  const estates = ['hearts', 'diamonds', 'clubs', 'spades'];
+  const suitIcon = { hearts: '♥', diamonds: '♦', clubs: '♣', spades: '♠' };
+  async function addCard(card) {
+    const suit = card.split('-')[1];
+    const old = state.plan.find(o => o.card === card);
+    if (old) { state.plan = state.plan.filter(o => o !== old); render(); return; }
+    state.plan = state.plan.filter(o => !o.card.endsWith('-' + suit));
+    const order = { card, kind: 'claim', treasury: 0 };
+    if (card.startsWith('jack-')) {
+      order.target = await choose('Jack: target an opponent', m.players.filter(p => p.id !== me.id).map(p => [p.id, p.name]));
+    }
+    state.plan.push(order); render();
+  }
+  return node('div', { class: 'fourfold-screen' },
+    node('div', { class: 'row split' }, node('div', {}, node('span', { class: 'eyebrow' }, 'FOURFOLD MANDATE'),
+      title(m.phase === 'complete' ? (m.winners.length > 1 ? 'Shared victory' : 'Match complete') : `Round ${m.round} of 12`, 1)),
+      button(state.matchSource === 'remote' ? 'Online rooms' : 'Back to launcher', () => nav(state.matchSource === 'remote' ? 'online' : 'home'))),
+    node('div', { class: 'estates' }, ...estates.map(suit => section(
+      node('span', { class: `suit-icon suit-${suit}` }, suitIcon[suit]), title(suit.toUpperCase(), 3),
+      node('span', { class: 'muted' }, `Target: ${m.targets[suit]}`)))),
+    node('div', { class: 'fourfold-score' }, ...m.players.map(p => section(
+      node('div', { class: 'row split' }, title(p.name, 3), node('span', { class: 'chip green' }, p.ready ? 'READY' : 'PLANNING')),
+      node('p', {}, `${p.mp} MP · ${p.treasury} Treasury`),
+      node('p', { class: 'minor' }, estates.map(s => `${suitIcon[s]} ${p.seals[s]}`).join('   ')),
+      node('p', { class: 'minor' }, `${p.available_count} cards remaining${p.foundation ? ` · Foundation ${p.foundation.card}` : ''}`)))),
+    m.phase === 'complete' ? section(title(`Winners: ${m.players.filter(p => m.winners.includes(p.id)).map(p => p.name).join(' and ')}`, 2),
+      button('Return home', () => nav('home'), { class: 'primary' })) :
+      me && !me.ready ? node('div', {}, section(node('div', { class: 'row split' }, title(`${me.name}: secret orders`, 2),
+        node('b', {}, `${cp} / 16 CP · ${treasury} / ${me.treasury} Treasury`)),
+        node('p', { class: 'muted' }, 'Choose up to three different estates. Click a card to add or remove it. Secret choices lock when submitted.'),
+        ...state.plan.map(o => node('div', { class: 'order-row' }, node('b', {}, o.card),
+          node('span', { class: 'minor' }, o.kind === 'foundation' ? 'Foundation' : o.target ? `Jack → ${o.target}` : 'Contest'),
+          button(`Boost: ${o.treasury}`, () => {
+            if (o.kind === 'claim') { o.treasury = (o.treasury + 1) % 3; render(); }
+          }, { disabled: o.kind === 'foundation' }),
+          button(o.kind === 'foundation' ? 'Use as claim' : 'Build foundation', () => {
+            o.kind = o.kind === 'foundation' ? 'claim' : 'foundation'; o.treasury = 0; render();
+          }, { disabled: !(Number.parseInt(o.card, 10) >= 1 && Number.parseInt(o.card, 10) <= 10) ||
+            (m.round - 1) % 4 > 1 || !!me.foundation }),
+          button('Remove', () => { state.plan = state.plan.filter(x => x !== o); render(); }))),
+        button('Lock and submit orders', () => task(() => perform(me.id, 'submit', { orders: state.plan })),
+          { class: 'primary', disabled: cp > 16 || treasury > me.treasury || state.plan.length > 3 })),
+      section(title('Unspent cards', 2), node('div', { class: 'fourfold-hand' }, ...me.available.map(card => {
+        const selected = state.plan.some(o => o.card === card);
+        const btn = button('', () => task(() => addCard(card)), { class: `fourfold-card ${selected ? 'selected' : ''}`,
+          'aria-label': `Select ${card}`, 'aria-pressed': String(selected) });
+        btn.append(fourfoldArt(card)); return btn;
+      })))) : section(node('p', {}, 'Your orders are locked. Pass the device to the next participant.')),
+    node('div', { class: 'events' }, title('Completed rounds', 3),
+      ...m.events.filter(e => e.type === 'round_resolved').slice(-4).reverse().map(e => section(
+        node('b', {}, `Round ${e.round}`), node('p', { class: 'minor' }, e.awards.map(a =>
+          `${a.estate}: ${a.winner || `tie (${a.tie.join(', ')})`}`).join(' · '))))));
+}
 function settings() {
   const p = state.prefs;
   function selection(name, options, field) {
@@ -236,13 +360,90 @@ function help() {
       title('Finish', 3), node('p', {}, 'Call LAST CARD when one card remains. Playing your final card wins before its action occurs.'),
       node('p', { class: 'minor' }, 'Prototype v1.0: Cycle and some rule parameters remain provisional.')));
 }
+function onlinePage() {
+  const serverInput = node('input', { type: 'url', placeholder: 'https://cards.example.com:8775',
+    value: state.remote?.server || 'http://127.0.0.1:8775' });
+  const roomInput = node('input', { placeholder: 'Room ID', maxlength: 36 });
+  const inviteInput = node('input', { placeholder: 'Invitation code' });
+  const gameSelect = node('select', {}, ...[['four-color', 'Four-Color'], ['fourfold', 'Fourfold Mandate']].map(([id, name]) =>
+    node('option', { value: id }, name)));
+  const seatCount = node('select', {}, ...[2, 3, 4, 5, 6, 7, 8].map(n => node('option', { value: n }, String(n))));
+  const seat = node('select', {}, ...(state.match?.players || []).filter(p => p.id !== state.remote?.seat).map(p =>
+    node('option', { value: p.id }, p.name)));
+  function validatedServer() {
+    const url = new URL(serverInput.value.trim());
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash ||
+      (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)))) {
+      throw new Error('Use a secure HTTPS room service (HTTP is allowed only for localhost testing).');
+    }
+    return url.origin;
+  }
+  async function connect(room, token, mySeat) {
+    state.remote = { ...state.remote, room, token, seat: mySeat };
+    sessionStorage.setItem('cg-remote-room', JSON.stringify(state.remote));
+    state.match = await remoteApi(`/rooms/${room}`);
+    state.viewer = mySeat; state.ready = true; state.plan = []; state.matchSource = 'remote';
+    state.page = 'table';
+  }
+  return node('div', { class: 'narrow' }, title('Online rooms', 1),
+    node('p', { class: 'muted' }, 'Play with friends on a separately hosted Card Games room server. Room seats are protected by private tokens. No cloud account is required.'),
+    section(title('Server', 3), node('label', { class: 'form-field' }, node('span', {}, 'Trusted room-service address'), serverInput),
+      node('p', { class: 'minor' }, 'The remote service must explicitly allow this launcher origin. For internet access, deploy it behind TLS.')),
+    state.remote?.room ? section(title('Current room', 3),
+      node('p', {}, `Room ${state.remote.room} · Seat ${state.remote.seat}`),
+      button('Open table', () => task(async () => { await refreshMatch(); state.ready = true; state.page = 'table'; }), { class: 'primary' }),
+      button('Leave this device', () => { sessionStorage.removeItem('cg-remote-room'); state.remote = null; state.match = null;
+        state.matchSource = 'local'; render(); }),
+      state.remote?.seat === state.match?.players?.[0]?.id ?
+        node('div', {}, node('label', { class: 'form-field' }, node('span', {}, 'Invite a seat'), seat),
+          button('Generate one-use invite', () => task(async () => {
+            state.invite = await remoteApi(`/rooms/${state.remote.room}/invites`, {
+              method: 'POST', body: JSON.stringify({ seat: seat.value }) });
+          }), { class: 'primary' }),
+          state.invite ? node('p', { class: 'invite-details' }, `Room: ${state.invite.room}\nSeat: ${state.invite.seat}\nInvite: ${state.invite.invite}`) : null) : null) :
+      section(title('Create a new room', 3),
+        node('label', { class: 'form-field' }, node('span', {}, 'Game'), gameSelect),
+        node('label', { class: 'form-field' }, node('span', {}, 'Number of people'), seatCount),
+        button('Create online room', () => task(async () => {
+          state.remote = { server: validatedServer() };
+          const count = Number(seatCount.value);
+          if (gameSelect.value === 'fourfold' && count > 6) throw new Error('Fourfold supports at most six players.');
+          const participants = Array.from({ length: count }, (_, i) => ({ id: `player${i + 1}`, name: `Player ${i + 1}`, kind: 'human' }));
+          const result = await remoteApi('/rooms', { method: 'POST', body: JSON.stringify({ game: gameSelect.value, participants }) });
+          await connect(result.room, result.token, result.seat);
+        }), { class: 'primary' })),
+    section(title('Join with an invitation', 3),
+      node('label', { class: 'form-field' }, node('span', {}, 'Room ID'), roomInput),
+      node('label', { class: 'form-field' }, node('span', {}, 'Private one-use invitation'), inviteInput),
+      button('Join room', () => task(async () => {
+        state.remote = { server: validatedServer() };
+        const result = await remoteApi(`/rooms/${encodeURIComponent(roomInput.value.trim())}/join`, {
+          method: 'POST', body: JSON.stringify({ invite: inviteInput.value.trim() }) });
+        await connect(result.room, result.token, result.seat);
+      }), { class: 'primary' })));
+}
 function accountPage() {
   const signed = state.account.status === 'signed-in';
-  if (signed) return node('div', { class: 'narrow' }, title('Your profile', 1),
-    section(title(`Welcome, ${state.account.username}`, 3), node('p', { class: 'muted' }, 'Your saved matches and preferences are kept in your account.'),
+  if (signed) {
+    const display = node('input', { type: 'text', maxlength: 40, value: state.profile.display_name });
+    const avatar = node('select', {}, ...['initials', 'circle', 'suit'].map(x =>
+      node('option', { value: x, selected: x === state.profile.avatar ? '' : null }, x)));
+    return node('div', { class: 'narrow' }, title('Your profile', 1),
+      section(title(`Welcome, ${state.account.username}`, 3),
+        node('p', { class: 'muted' }, 'Your username is fixed; your public display name and avatar style are editable.'),
+        node('label', { class: 'form-field' }, node('span', {}, 'Display name'), display),
+        node('label', { class: 'form-field' }, node('span', {}, 'Avatar style'), avatar),
+        button('Save profile', () => task(async () => {
+          state.profile = await api('/profile', { method: 'PUT', body: JSON.stringify({ display_name: display.value, avatar: avatar.value }) });
+          toast('Profile saved.');
+        }), { class: 'primary' }),
+        button('Refresh session', () => task(async () => {
+          await api('/account/refresh', { method: 'POST' }); await refreshAccount(); toast('Session renewed.');
+        })),
       button('Log out', () => task(async () => {
         await api('/account/logout', { method: 'POST' }); await refreshAccount(); nav('home');
-      }), { class: 'primary' })));
+      }), { class: 'warning' })));
+  }
   if (state.account.available !== 'true') return node('div', { class: 'narrow' }, title('Accounts unavailable', 1),
     section(node('p', {}, 'SLAI authentication is not currently available. Guest games remain fully playable locally.')));
   const username = node('input', { type: 'text', placeholder: 'Username', autocomplete: 'username', maxlength: 32 });
@@ -264,6 +465,7 @@ function accountPage() {
 }
 async function refreshAccount() {
   state.account = await api('/account');
+  state.profile = await api('/profile');
   state.saved = await api('/matches');
   state.stats = await api('/stats');
   state.prefs = await api('/settings');
@@ -273,18 +475,43 @@ async function refreshAccount() {
 }
 function render() {
   const content = state.page === 'home' ? home() : state.page === 'games' ? games() :
-    state.page === 'setup' ? setup() : state.page === 'table' ? table() : state.page === 'settings' ? settings() :
+    state.page === 'setup' ? setup() : state.page === 'table' ? table() : state.page === 'online' ? onlinePage() : state.page === 'settings' ? settings() :
     state.page === 'saved' ? node('div', {}, title('Saved matches', 1), ...state.saved.map(savedTile)) :
     state.page === 'stats' ? stats() : state.page === 'account' ? accountPage() : help();
   clear(root); root.append(shell(content));
 }
 async function initialize() {
   try {
-    [state.catalog, state.saved, state.prefs, state.account, state.stats] = await Promise.all([
-      api('/catalog'), api('/matches'), api('/settings'), api('/account'), api('/stats')]);
+    try {
+      const savedRoom = sessionStorage.getItem('cg-remote-room');
+      if (savedRoom) {
+        const remote = JSON.parse(savedRoom);
+        if (remote.server && remote.room && remote.seat && remote.token) state.remote = remote;
+      }
+    } catch { sessionStorage.removeItem('cg-remote-room'); }
+    state.account = await api('/account');
+    if (state.account.status === 'guest' && state.account.available === 'true') {
+      try { await api('/account/refresh', { method: 'POST' }); } catch { /* No refresh cookie on guest devices. */ }
+      state.account = await api('/account');
+    }
+    [state.catalog, state.saved, state.prefs, state.stats, state.profile] = await Promise.all([
+      api('/catalog'), api('/matches'), api('/settings'), api('/stats'), api('/profile')]);
     document.documentElement.dataset.theme = state.prefs.theme;
     state.setup.difficulty = state.prefs.difficulty;
     render();
   } catch (e) { root.replaceChildren(section(title('Unable to start Card Games'), node('p', {}, e.message))); }
 }
 initialize();
+// Online state uses bounded polling; the server remains the sole authority.
+let onlinePolling = false;
+setInterval(async () => {
+  if (state.matchSource !== 'remote' || !state.remote?.room || state.page !== 'table' || onlinePolling) return;
+  if (state.match?.game === 'fourfold' && state.match.phase === 'plan' &&
+    state.match.players.some(p => p.id === state.remote.seat && !p.ready)) return;
+  if (state.match?.game === 'four-color' && !state.match.winner &&
+    (state.match.players[state.match.current]?.id === state.remote.seat ||
+      state.match.choices?.some(c => c.player === state.remote.seat))) return;
+  onlinePolling = true;
+  try { await refreshMatch(); render(); } catch { /* Retain the local view for manual reconnect. */ }
+  finally { onlinePolling = false; }
+}, 3000);

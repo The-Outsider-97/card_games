@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .game import CARDS
+from .fourfold import DECK, SUITS
 
 
 class AssetRegistry:
@@ -29,19 +30,36 @@ class AssetRegistry:
         duplicates: list[list[str]] = []
         if collection == "colors":
             missing = sorted(set(CARDS) - set(actual))
+        elif collection == "symbols":
+            # A complete *equivalent* Four-Color variant needs every colored
+            # face plus the 11 neutral actions. No suit/color meaning is assigned.
+            expected = {f"{key}-{suit}" for suit in SUITS for key in
+                        (f"{n:02d}" for n in range(14))}
+            expected |= {f"{name}-{suit}" for suit in SUITS for name in
+                         ("A", "J", "Q", "K", "+1", "+2", "+4", "+5", "cycle", "reverse", "skip", "stop", "Wild")}
+            missing = sorted(expected - set(actual))
+            # Neutral actions have no approved suit-based representation.
+            missing += sorted(f"{action}-neutral" for action in
+                              ("+2", "+4", "cycle", "reverse", "skip", "stop", "Wild", "equality", "verdict", "swap", "steal"))
         elif collection == "fourfold":
-            # Fourfold's actual rules are unspecified. Only check the observed art-family naming.
+            # Normalize historic plural/singular estate labels, not rules.
             normalized: dict[str, list[str]] = {}
             for name in actual:
                 if name == "cover":
                     continue
-                key = name.lower().replace(" (2)", "").replace("-heart", "-hearts").replace("-spade", "-spades")
+                key = name.lower().replace(" (2)", "")
+                if key.endswith("-heart") or key.endswith("-spade"):
+                    key += "s"
                 normalized.setdefault(key, []).append(name)
             duplicates = [entries for entries in normalized.values() if len(entries) > 1]
-            missing = ["king-hearts"] if "king-hearts" not in normalized else []
+            missing = sorted(set(DECK) - set(normalized))
         return {"collection": collection, "files": len(actual), "faces": len(actual) - int("cover" in actual),
                 "missing": missing, "duplicate_labels": duplicates, "cover": "cover" in actual,
-                "status": "complete" if not missing and not duplicates and "cover" in actual else "needs-review"}
+                "status": "complete" if not missing and not duplicates and "cover" in actual else "needs-review",
+                "note": ("Neutral actions and Reverse art are missing; a suit-to-color semantics mapping is not approved."
+                         if collection == "symbols" else
+                         "Use a labeled placeholder for missing images; never fabricate a card face."
+                         if collection == "fourfold" else "")}
 
     def report(self) -> list[dict[str, Any]]:
         return [self.inspect(collection) for collection in self.COLLECTIONS]
