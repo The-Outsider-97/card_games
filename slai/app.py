@@ -29,7 +29,7 @@ def _bootstrap_slai(explicit: str | None) -> Path:
 def build_router():
     from applications.tools.errors import BadRequest, NotFound
     from applications.tools.server import Router, Response, ok
-    from app.game import GameError
+    from app.game import CARDS, GameError
     from http.cookies import SimpleCookie
 
     router = Router()
@@ -66,6 +66,20 @@ def build_router():
     @router.route("GET", "/api/assets")
     def assets(app, req):
         return app.service.assets.report()
+
+    @router.route("GET", "/api/card-art/{id}")
+    def card_art(app, req):
+        # The shared SLAI static path allowlist intentionally excludes '+'.
+        # Resolve just those existing, whitelisted card faces here instead of
+        # renaming or copying any original artwork or weakening shared routing.
+        alias = req.params["id"]
+        card = "+" + alias[4:] if alias.startswith("plus") else ""
+        if card not in CARDS or not card.startswith("+"):
+            raise NotFound("Card artwork not found")
+        path = ROOT / "cards" / "colors" / f"{card}.jpg"
+        if not path.is_file():
+            raise NotFound("Card artwork not found")
+        return Response(200, path.read_bytes(), "image/jpeg", {"Cache-Control": "private, max-age=3600"})
 
     @router.route("GET", "/api/health")
     def health(app, req):

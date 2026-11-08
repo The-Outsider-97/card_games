@@ -10,6 +10,7 @@ A local-first desktop-style launcher for original card games, powered by SLAI's 
 - **Fourfold Mandate First Edition v1.0**: 2–6 players, 56 cards per player, 12 rounds of simultaneously committed orders, exact-match targets, CP/Treasury economics, Foundations, Jack/Queen/King abilities, estate contests, seals, era rewards, set bonuses and tie breakers. See [Fourfold rules and artwork register](doc/FOURFOLD.md).
 - Local human and AI seats, including mixed matches and hot-seat privacy screens.
 - Compact, in-table hot-seat handoffs with card-flip/reveal animations. Solo-human matches against SLAI opponents continue without a pointless pass-the-device prompt. Motion honors both the SLAI preference and OS reduced-motion settings.
+- Visual Steal card selection, explicit current/next-player status, and public SLAI card-play animations that land on the discard pile (with a reduced-motion fallback). Original `+1`/`+2`/`+4`/`+5` card art is served through a whitelist-validated compatibility route because the shared static toolkit rejects `+` filenames.
 - Browser launcher, game cards, setup, table, settings, recent matches and history.
 - SQLite match recovery and preferences through `applications.tools.database.Database`.
 - SLAI's hardened loopback server and shared CSS (`applications/tools`).

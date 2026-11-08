@@ -154,7 +154,20 @@ function setup() {
           state.saved = await api('/matches'); state.stats = await api('/stats');
         }), { class: 'primary' }))));
 }
-function image(card, className = '') { return node('img', { src: `/assets/colors/${card}.jpg`, class: className, alt: card.replace('-', ' '), loading: 'lazy' }); }
+function cardArtPath(card) {
+  // The SLAI static-file allowlist excludes '+': use the narrowly scoped art
+  // route only for those physical faces, preserving their original filenames.
+  return card.startsWith('+') ? `/api/card-art/plus${encodeURIComponent(card.slice(1))}` :
+    `/assets/colors/${encodeURIComponent(card)}.jpg`;
+}
+function image(card, className = '', eager = false) {
+  const element = node('img', { src: cardArtPath(card), class: className,
+    alt: card.replace('-', ' '), loading: eager ? 'eager' : 'lazy' });
+  element.addEventListener('error', () => element.replaceWith(node('span', {
+    class: 'art-fallback', role: 'img', 'aria-label': `${card} artwork unavailable`,
+  }, card)));
+  return element;
+}
 function fourfoldArt(card) {
   const aliases = { 'queen-hearts': 'queen-heart', 'queen-spades': 'queen-spade', 'king-spades': 'king-spade' };
   if (card === 'king-hearts') return node('span', { class: 'art-fallback', role: 'img', 'aria-label': 'King of Hearts artwork missing' }, 'K ♥');
@@ -214,14 +227,64 @@ async function animatePlayedCard(card) {
   selected.classList.add('is-playing');
   await new Promise(resolve => setTimeout(resolve, 260));
 }
-async function choose(message, options) {
+async function choose(message, options, { cards = false, cancel = false } = {}) {
   return new Promise(resolve => {
-    const shade = node('div', { class: 'modal-shade' });
-    const grid = node('div', { class: 'choice-grid' }, ...options.map(([value, name]) => button(name, () => {
-      shade.remove(); resolve(value);
-    }, { class: 'choice' })));
-    shade.append(section(title(message, 3), grid)); document.body.append(shade);
+    const shade = node('div', { class: `modal-shade ${cards ? 'modal-card-choice' : ''}` });
+    const grid = node('div', { class: `choice-grid ${cards ? 'card-choice-grid' : ''}` }, ...options.map(([value, name]) => {
+      const choice = button(cards ? '' : name, () => { shade.remove(); resolve(value); },
+        { class: `choice ${cards ? 'card-choice' : ''}`, 'aria-label': String(name) });
+      if (cards) choice.append(image(value), node('span', {}, name));
+      return choice;
+    }));
+    shade.append(section(title(message, 3), grid,
+      cancel ? button('Cancel', () => { shade.remove(); resolve(null); }, { class: 'subtle choice-cancel' }) : null));
+    document.body.append(shade);
   });
+}
+function recentAiPlays(before, after) {
+  if (before?.game !== 'four-color' || after?.game !== 'four-color' || after.revision <= before.revision) return [];
+  const oldEvents = before.events || [], newEvents = after.events || [];
+  let overlap = Math.min(oldEvents.length, newEvents.length);
+  while (overlap > 0 && JSON.stringify(oldEvents.slice(-overlap)) !== JSON.stringify(newEvents.slice(0, overlap))) overlap--;
+  return newEvents.slice(overlap).filter(event => event.type === 'play' &&
+    after.players.some(player => player.id === event.player && player.kind === 'ai')).slice(-4);
+}
+async function animateAiPlays(events, players) {
+  if (!events.length || !motionEnabled() || state.page !== 'table') return;
+  const discard = document.querySelector('[data-pile="discard"] img');
+  const field = document.querySelector('.playing-field');
+  if (!discard || !field) return;
+  for (const event of events) {
+    if (state.page !== 'table') break;
+    const player = players.find(p => p.id === event.player);
+    const seat = [...document.querySelectorAll('.opponent')].find(el => el.getAttribute('data-player-id') === event.player);
+    const start = (seat || field).getBoundingClientRect(), end = discard.getBoundingClientRect();
+    const fromX = start.left + (start.width - 90) / 2, fromY = start.top + (start.height - 128) / 2;
+    const dx = end.left + (end.width - 90) / 2 - fromX, dy = end.top + (end.height - 128) / 2 - fromY;
+    const card = node('div', { class: 'ai-flight-card' },
+      node('div', { class: 'ai-flight-inner' }, node('div', { class: 'ai-flight-back' }, image('cover', '', true)),
+        node('div', { class: 'ai-flight-front' }, image(event.card, '', true))));
+    card.style.left = `${fromX}px`; card.style.top = `${fromY}px`;
+    const overlay = node('div', { class: 'ai-flight-overlay', 'aria-live': 'polite' },
+      node('div', { class: 'ai-flight-label' }, `${player?.name || 'SLAI'} plays ${event.card}`), card);
+    document.body.append(overlay);
+    try {
+      const animation = card.animate([
+        { transform: 'translate(0, 0) scale(.7) rotateY(0deg)', opacity: .85 },
+        { transform: `translate(${dx * .55}px, ${dy * .55}px) scale(1.06) rotateY(100deg)`, opacity: 1, offset: .6 },
+        { transform: `translate(${dx}px, ${dy}px) scale(1) rotateY(180deg)`, opacity: 1 },
+      ], { duration: 560, easing: 'cubic-bezier(.2,.7,.2,1)', fill: 'forwards' });
+      await Promise.race([animation.finished.catch(() => {}), new Promise(resolve => setTimeout(resolve, 750))]);
+      // The server already resolved this action. Only the public preview changes;
+      // the authoritative discard and turn arrive in the final state render.
+      discard.src = cardArtPath(event.card);
+      discard.alt = event.card.replace('-', ' ');
+    } catch (error) {
+      // An animation API/display failure must never invalidate a move that the
+      // server has already committed. The final render restores its true state.
+      console.warn('Card animation unavailable:', error);
+    } finally { overlay.remove(); }
+  }
 }
 async function refreshMatch(viewer = state.viewer) {
   if (state.matchSource === 'remote' && state.remote) {
@@ -244,6 +307,7 @@ async function perform(actor, command, args = {}) {
   }
   const result = await api(`/matches/${match.id}/actions`, {
     method: 'POST', body: JSON.stringify({ actor, command, args, revision: match.revision }) });
+  await animateAiPlays(recentAiPlays(match, result), result.players);
   state.selected.clear(); state.lastCard = false; state.ready = false; state.plan = [];
   const solo = soloHumanId(result);
   const nextDecision = result.game === 'fourfold' ? result.players.find(p => p.kind === 'human' && !p.ready)?.id :
@@ -266,7 +330,10 @@ async function playCard(card) {
   if (neutral) args.color = await choose('Choose the next color', ['blue', 'green', 'red', 'yellow'].map(c => [c, c.toUpperCase()]));
   if (family === 'Wild') args.number = await choose('Declare a number', Array.from({ length: 14 }, (_, i) => [i, String(i)]));
   if (family === 'verdict') args.target = await choose('Select an opponent', match.players.filter(p => p.id !== player.id).map(p => [p.id, p.name]));
-  if (family === 'steal') args.steal = await choose('Take an earlier discard', match.stealable.map(c => [c, c]));
+  if (family === 'steal') {
+    args.steal = await choose('Take an earlier discard', match.stealable.map(c => [c, c]), { cards: true, cancel: true });
+    if (args.steal == null) return;
+  }
   await animatePlayedCard(card);
   await perform(player.id, 'play', args);
 }
@@ -287,17 +354,27 @@ function table() {
   const next = m.players.find(p => p.id === nextId);
   const me = handoff ? null : m.players.find(p => p.id === state.viewer);
   const choice = m.choices?.[0];
+  const acting = next || current;
   return node('div', { class: 'game-screen' },
     node('div', { class: 'row split' }, node('div', {}, node('span', { class: 'eyebrow' }, 'FOUR-COLOR'),
       title(m.winner ? `${m.players.find(p => p.id === m.winner)?.name} wins!` : `${current.name}'s turn`, 2)),
       node('div', { class: 'row' }, button('Rules', () => nav('help')), button('Leave table', () => nav('home')))),
-    node('div', { class: 'opponents' }, ...m.players.filter(p => p.id !== state.viewer).map(p =>
-      node('div', { class: `opponent ${p.id === current.id ? 'current' : ''}` },
+    node('div', { class: 'turn-banner', role: 'status', 'aria-live': 'polite' },
+      node('div', {}, node('span', { class: 'turn-kicker' }, m.winner ? 'MATCH FINISHED' :
+        handoff ? 'NEXT PLAYER' : choice ? 'DECISION REQUIRED' : 'NEXT TO ACT'),
+      node('strong', {}, m.winner ? `${m.players.find(p => p.id === m.winner)?.name || 'Player'} won` : acting.name)),
+      node('span', { class: 'turn-hint' }, m.winner ? 'Well played!' : handoff ?
+        'Reveal your hand to continue' : choice ? 'Choose the required cards' :
+        acting.kind === 'ai' ? 'SLAI is deciding' : acting.id === state.viewer ? 'Your move' : 'Waiting for their move')),
+    node('div', { class: 'opponents' }, ...m.players.map(p =>
+      node('div', { class: `opponent ${p.id === acting.id && !m.winner ? 'current' : ''} ${p.id === state.viewer ? 'self' : ''}`,
+        'data-player-id': p.id, ...(p.id === acting.id && !m.winner ? { 'aria-current': 'step' } : {}) },
         node('span', { class: 'avatar mini' }, p.kind === 'ai' ? 'AI' : 'P'), node('b', {}, p.name),
-        node('span', { class: 'minor' }, `${p.count} cards${p.verdict ? ` · ${p.verdict} missed` : ''}`)))),
+        node('span', { class: 'minor' }, `${p.count} cards${p.verdict ? ` · ${p.verdict} missed` : ''}`),
+        p.id === acting.id && !m.winner ? node('span', { class: 'turn-chip' }, 'NEXT') : null))),
     node('div', { class: 'playing-field' }, node('div', { class: 'piles' },
-      node('div', { class: 'pile' }, image('cover'), node('span', {}, `Draw · ${m.draw_count}`)),
-      node('div', { class: 'pile' }, image(m.discard[m.discard.length - 1]), node('span', {}, 'Discard'))),
+      node('div', { class: 'pile', 'data-pile': 'draw' }, image('cover'), node('span', {}, `Draw · ${m.draw_count}`)),
+      node('div', { class: 'pile', 'data-pile': 'discard' }, image(m.discard[m.discard.length - 1]), node('span', {}, 'Discard'))),
       node('div', { class: 'state-badges' }, node('span', { class: `color-dot ${m.active_color}` }),
         `Active ${m.active_color} · ${m.direction === 1 ? 'Clockwise ↻' : 'Counterclockwise ↺'}`,
         m.wild_rank == null ? '' : ` · Rank ${m.wild_rank}`,
@@ -358,6 +435,11 @@ function fourfoldTable() {
     node('div', { class: 'row split' }, node('div', {}, node('span', { class: 'eyebrow' }, 'FOURFOLD MANDATE'),
       title(m.phase === 'complete' ? (m.winners.length > 1 ? 'Shared victory' : 'Match complete') : `Round ${m.round} of 12`, 1)),
       button(state.matchSource === 'remote' ? 'Online rooms' : 'Back to launcher', () => nav(state.matchSource === 'remote' ? 'online' : 'home'))),
+    m.phase === 'plan' ? node('div', { class: 'turn-banner', role: 'status', 'aria-live': 'polite' },
+      node('div', {}, node('span', { class: 'turn-kicker' }, 'AWAITING SEALED ORDERS'),
+        node('strong', {}, next ? next.name : 'All orders submitted')),
+      node('span', { class: 'turn-hint' }, handoff ? 'Next player: reveal your planning area' :
+        next ? `${m.players.filter(p => p.ready).length} of ${m.players.length} players ready` : 'Resolving round')) : null,
     node('div', { class: 'estates' }, ...estates.map(suit => section(
       node('span', { class: `suit-icon suit-${suit}` }, suitIcon[suit]), title(suit.toUpperCase(), 3),
       node('span', { class: 'muted' }, `Target: ${m.targets[suit]}`)))),
