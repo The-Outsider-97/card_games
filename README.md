@@ -2,15 +2,20 @@
 
 A local-first desktop-style launcher for original card games, powered by SLAI's shared application toolkit.
 
-**Status: two playable rules engines, local account/profile support and a separate self-hosted online room service. Not yet independently production-certified.**
+**Status: six registered playable games (five rules engines, including two 21 profiles), local account/profile support and a separate self-hosted online room service for Four-Color and Fourfold. Not independently production-certified.**
 
 ## Currently available
 
 - Four-Color v1.0 prototype: 119-face color deck, 2–8 seats, documented action rules, turn validation, draw/recycle, one-card turns, pending selections, last-card challenge, winner detection.
 - **Fourfold Mandate First Edition v1.0**: 2–6 players, 56 cards per player, 12 rounds of simultaneously committed orders, exact-match targets, CP/Treasury economics, Foundations, Jack/Queen/King abilities, estate contests, seals, era rewards, set bonuses and tie breakers. See [Fourfold rules and artwork register](doc/FOURFOLD.md).
+- **Skip-Bo**: 2–6 players, a 162-instance logical deck reusing 52 original `colors/` face designs (1–12 and Wild); build four 1–12 sequences and be first to empty your stockpile.
+- **Competitive 21**: 2–6-player explicitly labeled *house variant*, without a dealer, played on the standard 52 suited faces.
+- **Blackjack**: 2–6 human/AI players against a fixed dealer; hit, stand, natural Blackjack, dealer stands on all 17s. No wagering/splits/doubles.
+- **Five-card Knuckles**: 2–6 players, five-card lowest-score game, draw/discard or knock; no physical forfeit mechanics.
+- All new games are **local/hot-seat/AI only**; the separate online room service currently supports Four-Color and Fourfold. See [rules, card subsets and limits](doc/GAME_VARIANTS.md).
 - Local human and AI seats, including mixed matches and hot-seat privacy screens.
 - Compact, in-table hot-seat handoffs with card-flip/reveal animations. Solo-human matches against SLAI opponents continue without a pointless pass-the-device prompt. Motion honors both the SLAI preference and OS reduced-motion settings.
-- Visual Steal card selection, explicit current/next-player status, and public SLAI card-play animations that land on the discard pile (with a reduced-motion fallback). Original `+1`/`+2`/`+4`/`+5` card art is served through a whitelist-validated compatibility route because the shared static toolkit rejects `+` filenames.
+- Visual Steal card selection, explicit current/next-player status, and Four-Color SLAI card-play animations that flip from cover **to the revealed face** and land on a four-card, face-up fanned discard stack (with a reduced-motion fallback). Original `+1`/`+2`/`+4`/`+5` card art is served through a whitelist-validated compatibility route because the shared static toolkit rejects `+` filenames.
 - Browser launcher, game cards, setup, table, settings, recent matches and history.
 - SQLite match recovery and preferences through `applications.tools.database.Database`.
 - SLAI's hardened loopback server and shared CSS (`applications/tools`).
@@ -83,20 +88,23 @@ python -m utils.benchmark_ai --game four-color --games 20 --seed 7
 | --- | --- |
 | `app/game.py` | Authoritative Four-Color rules and serializable match state |
 | `app/fourfold.py` | Independent authoritative Fourfold v1.0 round resolver |
-| `app/service.py` | SQLite persistence, sessions, preferences and account adapter |
+| `app/variants.py` | Skip-Bo, competitive 21, dealer Blackjack and Knuckles authoritative local engines |
+| `app/service.py` | SQLite persistence, sessions, preferences, registry and account adapter |
 | `slai/app.py` | Shared SLAI loopback HTTP host and routes |
 | `slai/bridge/agents.py` | Optional structured SLAI card decision adapter and legal fallback |
 | `slai/online.py` | Independent network room authority; TLS-required remote access |
 | `src/client/` | Launcher and interactive web client |
 | `cards/` | Original card art collections; no game mechanics inferred from images |
 
-The launcher registers **Four-Color and Fourfold** as playable; the symbols variant remains unavailable pending missing faces and an approved rules mapping.
+The launcher registers **six games** as playable. The three standard-suit games use a validated 52-face **subset** of `symbols/`; the hypothetical *Four-Color with symbols* variant remains unavailable pending missing faces and an approved mapping. Card artwork and game registration remain independent.
 
 ## Prototype rules and known limitations
 
 - Four-Color mechanics are based on `four_color_card_game_rules_v1_0.pdf` supplied with the development request. See [rules decision register](doc/FOUR_COLOR.md).
 - The PDF's Cycle rule is **proposed, not approved**. This prototype currently implements that proposed rotation literally; physical-production approval and playtesting are still required.
 - `cards/symbols/` is 15 faces short of a canonical Four-Color-equivalent 119-face deck: four Reverse and eleven neutral actions. No suit-to-color correspondence or distinct rules have been approved. See [reconciliation](doc/FOUR_COLOR.md).
+- The registered Skip-Bo deck uses 162 **logical card instances** but only 52 source artworks. Its colors are decorative; it does not use `+` action cards or the other 67 color-collection faces. The 21 and Knuckles implementations have explicitly documented local-rule assumptions rather than claiming these are approved proprietary rules.
+- Four-Color's public AI flip and discard-fan animations have headless DOM regression coverage; genuine browser-based visual inspection remains outstanding. Additional games use immediate authoritative table updates, not the Four-Color discard animation.
 - `cards/fourfold/` has duplicate Spades King naming and lacks a King of Hearts image. The digital game uses the logical 56-card deck independently of artwork and shows a labeled missing-image placeholder.
 - Live SLAI BaseAgent specialization and timed calls were exercised against the SLAI v2.4 checkout. Benchmarks compare scripted policies over controlled matches; no claims of optimal strategy or human play balance are made.
 - The online room service uses explicit invitations and authenticated seat tokens but has **no global identity provider**, ranked matchmaking, spectators, or deployed cloud hosting. Browser clients poll rather than maintain a WebSocket.

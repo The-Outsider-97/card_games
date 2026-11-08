@@ -7,6 +7,7 @@ from typing import Any
 
 from .game import CARDS
 from .fourfold import DECK, SUITS
+from .variants import SKIP_DECK, STANDARD_DECK, face
 
 
 class AssetRegistry:
@@ -28,9 +29,18 @@ class AssetRegistry:
         actual = self.files(collection)
         missing: list[str] = []
         duplicates: list[list[str]] = []
+        game_subsets: dict[str, dict[str, Any]] = {}
         if collection == "colors":
             missing = sorted(set(CARDS) - set(actual))
+            subset_missing = sorted({face(card) for card in SKIP_DECK} - set(actual))
+            game_subsets["skip-bo"] = {"faces": len({face(card) for card in SKIP_DECK}),
+                                        "instances": len(SKIP_DECK), "missing": subset_missing,
+                                        "ready": not subset_missing and "cover" in actual}
         elif collection == "symbols":
+            subset_missing = sorted(set(STANDARD_DECK) - set(actual))
+            for game in ("21", "blackjack", "knuckles"):
+                game_subsets[game] = {"faces": len(STANDARD_DECK), "instances": len(STANDARD_DECK),
+                                      "missing": subset_missing, "ready": not subset_missing and "cover" in actual}
             # A complete *equivalent* Four-Color variant needs every colored
             # face plus the 11 neutral actions. No suit/color meaning is assigned.
             expected = {f"{key}-{suit}" for suit in SUITS for key in
@@ -55,6 +65,7 @@ class AssetRegistry:
             missing = sorted(set(DECK) - set(normalized))
         return {"collection": collection, "files": len(actual), "faces": len(actual) - int("cover" in actual),
                 "missing": missing, "duplicate_labels": duplicates, "cover": "cover" in actual,
+                "game_subsets": game_subsets,
                 "status": "complete" if not missing and not duplicates and "cover" in actual else "needs-review",
                 "note": ("Neutral actions and Reverse art are missing; a suit-to-color semantics mapping is not approved."
                          if collection == "symbols" else

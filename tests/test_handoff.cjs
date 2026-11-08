@@ -18,8 +18,14 @@ class FakeNode {
   addEventListener(event, callback) { this.handlers[event] = callback; }
   setAttribute(key, value) { this.attributes[key] = String(value); }
   getAttribute(key) { return this.attributes[key]; }
+  get lastElementChild() { return [...this.children].reverse().find(child => child instanceof FakeNode) || null; }
+  querySelector(selector) { return selector.startsWith('.') ? find(this, selector.slice(1)) : null; }
+  replaceWith(element) { this.replacedWith = element; }
   getBoundingClientRect() { return { left: 100, top: 100, width: 120, height: 145 }; }
-  animate(keyframes, options) { FakeNode.lastAnimation = { keyframes, options }; return { finished: Promise.resolve() }; }
+  animate(keyframes, options) {
+    FakeNode.animations = [...(FakeNode.animations || []), { keyframes, options }];
+    return { finished: Promise.resolve() };
+  }
   remove() {}
 }
 function flatten(node) {
@@ -55,6 +61,7 @@ const { state, table, fourfoldTable, render, perform, soloHumanId, cardArtPath, 
 assert.equal(cardArtPath('+5-yellow'), '/api/card-art/plus5-yellow');
 assert.equal(cardArtPath('+2-neutral'), '/api/card-art/plus2-neutral');
 assert.equal(cardArtPath('08-red'), '/assets/colors/08-red.jpg');
+assert.equal(cardArtPath('A-hearts', 'symbols'), '/assets/symbols/A-hearts.jpg');
 
 const score = () => ({ hearts: 0, diamonds: 0, clubs: 0, spades: 0 });
 const players = [
@@ -112,6 +119,10 @@ context.fetch = async () => ({ ok: true, status: 200,
   assert.match(colorView, /Player 1, you're up/);
   assert.match(colorView, /NEXT PLAYER/);
   assert.doesNotMatch(colorView, /PRIVATE_SECRET_CARD/);
+  state.match.discard = ['01-blue', '02-green', '03-yellow', '04-red', '05-red'];
+  const stack = find(table(), 'discard-stack');
+  assert.equal(stack.children.length, 4, 'Keep only the four most recent discards visibly stacked');
+  assert.equal(stack.children.at(-1).getAttribute('src'), '/assets/colors/05-red.jpg');
 
   const selectedCard = choose('Take an earlier discard', [['+5-yellow', '+5-yellow'], ['06-green', '06-green']],
     { cards: true, cancel: true });
@@ -169,14 +180,46 @@ context.fetch = async () => ({ ok: true, status: 200,
   assert.equal(aiPlays.length, 1);
   assert.equal(aiPlays[0].card, '+5-green');
   assert.equal(recentAiPlays(nextTurn, nextTurn).length, 0, 'No duplicate animation on stale revisions');
-  const discard = new FakeNode('img');
-  discard.setAttribute('src', cardArtPath('01-blue'));
+  const discard = new FakeNode('div');
+  discard.append(new FakeNode('img'));
   const field = new FakeNode('div');
   document.querySelector = selector => selector.includes('discard') ? discard : field;
   document.querySelectorAll = () => [];
-  await animateAiPlays(aiPlays, nextTurn.players);
-  assert.equal(discard.src, '/api/card-art/plus5-green', 'An AI play should land on the visible discard pile');
-  assert.equal(FakeNode.lastAnimation.options.duration, 560);
-  assert.match(FakeNode.lastAnimation.keyframes.at(-1).transform, /rotateY\(180deg\)/);
+  await animateAiPlays(aiPlays, nextTurn.players, ['01-blue']);
+  assert.equal(discard.replacedWith.children.at(-1).getAttribute('src'), '/api/card-art/plus5-green',
+    'An AI play should land face-up on the visible discard stack');
+  assert.equal(FakeNode.animations.length, 2, 'Use independent movement and face-reveal animations');
+  assert.equal(FakeNode.animations[0].options.duration, 560);
+  assert.doesNotMatch(FakeNode.animations[0].keyframes.at(-1).transform, /rotateY/,
+    'Movement must not rotate the entire card back to its cover');
+  assert.match(FakeNode.animations[1].keyframes.at(-1).transform, /rotateY\(180deg\)/);
+
+  // A new game may reuse an asset family without showing every face or
+  // exposing a different participant's private hand during handoff.
+  state.prefs.motion = false;
+  state.match = { id: 'skip-test', game: 'skip-bo', phase: 'play', current: 0,
+    players: [{ id: 'h1', name: 'Human', kind: 'human', stock_count: 30, stock_top: '01-blue~0',
+      hand_count: 5, hand: ['PRIVATE_SECRET_CARD'], discards: [null, null, null, null] },
+    { id: 'h2', name: 'Other', kind: 'human', stock_count: 30, stock_top: '03-red~0',
+      hand_count: 5, hand: [], discards: [null, null, null, null] }],
+    building: [[], [], [], []], legal_actions: [{ command: 'build',
+      args: { source: 'stock', card: '01-blue~0', pile: 0 } }], events: [], winners: [], winner: null };
+  state.viewer = null; state.ready = false;
+  const skipHandoff = flatten(table());
+  assert.match(skipHandoff, /NEXT PLAYER/);
+  assert.doesNotMatch(skipHandoff, /PRIVATE_SECRET_CARD/);
+  state.viewer = 'h1'; state.ready = true;
+  const skipTable = table();
+  assert.match(flatten(skipTable), /01-blue.jpg/);
+  assert.ok(find(skipTable, 'variant-action'), 'Skip-Bo should have real legal moves');
+  state.match = { ...state.match, game: 'blackjack', current: 0,
+    players: [{ id: 'h1', name: 'Human', kind: 'human', count: 2, done: false,
+      hand: ['A-hearts', 'K-diamonds'], total: 21 },
+    { id: 'h2', name: 'Other', kind: 'human', count: 2, done: false,
+      hand: ['PRIVATE_SECRET_CARD'], total: 11 }],
+    dealer: { upcard: '06-spades', hand: [], count: 2, total: null },
+    legal_actions: [{ command: 'stand', args: {} }] };
+  assert.match(flatten(table()), /A-hearts.jpg/);
+  assert.doesNotMatch(flatten(table()), /PRIVATE_SECRET_CARD/, 'Opponent hand never renders in ongoing Blackjack');
   console.log('Card Games DOM checks passed: handoffs, card art, Steal picker, next player, and AI plays.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
