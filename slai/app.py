@@ -141,7 +141,7 @@ def build_router():
     @router.route("POST", "/api/matches")
     def new_match(app, req):
         payload = req.json()
-        if payload.get("game", "four-color") not in ("four-color", "fourfold"):
+        if payload.get("game", "four-color") not in ("four-color", "fourfold", "skip-bo", "21", "blackjack", "knuckles"):
             raise BadRequest("Game rules are not yet available")
         participants = payload.get("participants")
         if not isinstance(participants, list) or any(not isinstance(p, dict) for p in participants):

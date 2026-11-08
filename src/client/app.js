@@ -60,8 +60,11 @@ function nav(page) {
       state.viewer = state.remote.seat; state.matchSource = 'remote'; state.page = 'online'; });
     return;
   }
-  state.page = page; state.ready = false; state.revealAnimation = false; state.selected.clear(); render();
+  const readingRules = page === 'help' && state.page === 'table';
+  state.page = page; if (!readingRules) state.ready = false;
+  state.revealAnimation = false; state.selected.clear(); render();
 }
+function returnFromRules() { state.page = 'table'; render(); }
 function shell(content) {
   const app = node('div', { class: 'shell' });
   const sidebar = node('aside', { class: 'sidebar' },
@@ -89,7 +92,7 @@ function gameTile(item) {
         item.status === 'assets-missing' ? 'ASSETS MISSING' : 'RULES PENDING'),
       node('span', { class: 'minor' }, item.players)), title(item.title, 3),
       node('p', {}, item.description), button(playable ? 'Play now' : 'Unavailable', () => {
-        if (playable) { state.setup.game = item.id; state.setup.ai = item.id === 'fourfold' ? 1 : 2; nav('setup'); }
+        if (playable) { state.setup.game = item.id; state.setup.ai = item.id === 'four-color' ? 2 : 1; nav('setup'); }
       },
         { class: 'primary full', disabled: !playable })));
 }
@@ -111,7 +114,9 @@ function home() {
 }
 function savedTile(item) {
   return section(node('div', { class: 'row split' }, node('div', {}, title(item.players.join(' · '), 3),
-    node('p', { class: 'minor' }, item.completed ? `Finished · winner ${item.winner}` : `In progress · move ${item.revision}`)),
+    node('p', { class: 'minor' }, item.completed ?
+      `Finished · ${item.winners?.length ? `winner ${item.winners.join(', ')}` : item.winner ? `winner ${item.winner}` : 'draw'}` :
+      `In progress · move ${item.revision}`)),
     button(item.completed ? 'Review' : 'Continue', () => task(async () => {
       state.match = await api(`/matches/${item.id}?viewer=`);
       state.viewer = null; state.plan = []; state.page = 'table'; state.ready = false; state.matchSource = 'local';
@@ -125,7 +130,7 @@ function games() { return node('div', {}, node('span', { class: 'eyebrow' }, 'TH
 function setup() {
   const humans = state.setup.humans, ai = state.setup.ai;
   const fourfold = state.setup.game === 'fourfold';
-  const limit = fourfold ? 6 : 8;
+  const limit = state.setup.game === 'four-color' ? 8 : 6;
   function numberInput(label, key, max) {
     return node('label', { class: 'form-field' }, node('span', {}, label), node('input', {
       type: 'number', min: key === 'humans' ? '1' : '0', max: String(max), value: String(state.setup[key]),
@@ -133,7 +138,8 @@ function setup() {
     }));
   }
   return node('div', { class: 'narrow' }, node('span', { class: 'eyebrow' }, 'NEW MATCH'), title('Set the table', 1),
-    node('p', { class: 'muted' }, fourfold ? 'Fourfold Mandate · 2–6 players · 12 rounds · 16 CP each round' : 'Four-Color · 2–8 players · 7 cards each · no stacking'),
+    node('p', { class: 'muted' }, state.catalog.find(item => item.id === state.setup.game)?.description ||
+      (fourfold ? 'Fourfold Mandate · 2–6 players' : 'Four-Color · 2–8 players')),
     section(title('Players', 3), node('div', { class: 'form-grid' }, numberInput('Local human players', 'humans', limit), numberInput('AI opponents', 'ai', limit - 1)),
       node('p', { class: 'minor' }, `Total ${humans + ai} players. First seat is always human.`),
       node('label', { class: 'form-field' }, node('span', {}, 'SLAI opponent difficulty'),
@@ -154,19 +160,29 @@ function setup() {
           state.saved = await api('/matches'); state.stats = await api('/stats');
         }), { class: 'primary' }))));
 }
-function cardArtPath(card) {
+function cardArtPath(card, collection = 'colors') {
   // The SLAI static-file allowlist excludes '+': use the narrowly scoped art
   // route only for those physical faces, preserving their original filenames.
-  return card.startsWith('+') ? `/api/card-art/plus${encodeURIComponent(card.slice(1))}` :
-    `/assets/colors/${encodeURIComponent(card)}.jpg`;
+  return collection === 'colors' && card.startsWith('+') ? `/api/card-art/plus${encodeURIComponent(card.slice(1))}` :
+    `/assets/${collection}/${encodeURIComponent(card)}.jpg`;
 }
-function image(card, className = '', eager = false) {
-  const element = node('img', { src: cardArtPath(card), class: className,
+function image(card, className = '', eager = false, collection = 'colors') {
+  const element = node('img', { src: cardArtPath(card, collection), class: className,
     alt: card.replace('-', ' '), loading: eager ? 'eager' : 'lazy' });
   element.addEventListener('error', () => element.replaceWith(node('span', {
     class: 'art-fallback', role: 'img', 'aria-label': `${card} artwork unavailable`,
   }, card)));
   return element;
+}
+function discardStack(cards) {
+  const recent = cards.slice(-4);
+  return node('div', { class: 'discard-stack', role: 'group',
+    'aria-label': `Recent discards: ${recent.join(', ')}` }, ...recent.map((card, index) => {
+    const face = image(card, 'discard-card', true);
+    face.style.left = `${index * 21}px`;
+    face.style.zIndex = String(index + 1);
+    return face;
+  }));
 }
 function fourfoldArt(card) {
   const aliases = { 'queen-hearts': 'queen-heart', 'queen-spades': 'queen-spade', 'king-spades': 'king-spade' };
@@ -184,10 +200,11 @@ function applyAppearance() {
   document.documentElement.dataset.motion = state.prefs.motion === false ? 'reduce' : 'normal';
 }
 function handoffPanel(game, next, label) {
+  const collection = game === 'fourfold' ? 'fourfold' : ['21', 'blackjack', 'knuckles'].includes(game) ? 'symbols' : 'colors';
   const visual = node('div', { class: 'handoff-card', 'aria-hidden': 'true' },
     node('div', { class: 'handoff-card-inner' },
       node('div', { class: 'handoff-card-side handoff-card-back' },
-        node('img', { src: `/assets/${game === 'fourfold' ? 'fourfold' : 'colors'}/cover.jpg`, alt: '' })),
+        node('img', { src: `/assets/${collection}/cover.jpg`, alt: '' })),
       node('div', { class: 'handoff-card-side handoff-card-front' }, '♠  ♥  ♦  ♣')));
   const confirm = button(next ? `I'm ${next.name} — Reveal ${label}` : 'Waiting for player',
     () => task(async () => {
@@ -249,16 +266,18 @@ function recentAiPlays(before, after) {
   return newEvents.slice(overlap).filter(event => event.type === 'play' &&
     after.players.some(player => player.id === event.player && player.kind === 'ai')).slice(-4);
 }
-async function animateAiPlays(events, players) {
+async function animateAiPlays(events, players, initialDiscards = []) {
   if (!events.length || !motionEnabled() || state.page !== 'table') return;
-  const discard = document.querySelector('[data-pile="discard"] img');
+  let discard = document.querySelector('[data-pile="discard"] .discard-stack');
   const field = document.querySelector('.playing-field');
   if (!discard || !field) return;
+  const shown = initialDiscards.slice(-4);
   for (const event of events) {
     if (state.page !== 'table') break;
     const player = players.find(p => p.id === event.player);
     const seat = [...document.querySelectorAll('.opponent')].find(el => el.getAttribute('data-player-id') === event.player);
-    const start = (seat || field).getBoundingClientRect(), end = discard.getBoundingClientRect();
+    const start = (seat || field).getBoundingClientRect();
+    const end = (discard.lastElementChild || discard).getBoundingClientRect();
     const fromX = start.left + (start.width - 90) / 2, fromY = start.top + (start.height - 128) / 2;
     const dx = end.left + (end.width - 90) / 2 - fromX, dy = end.top + (end.height - 128) / 2 - fromY;
     const card = node('div', { class: 'ai-flight-card' },
@@ -269,16 +288,26 @@ async function animateAiPlays(events, players) {
       node('div', { class: 'ai-flight-label' }, `${player?.name || 'SLAI'} plays ${event.card}`), card);
     document.body.append(overlay);
     try {
-      const animation = card.animate([
-        { transform: 'translate(0, 0) scale(.7) rotateY(0deg)', opacity: .85 },
-        { transform: `translate(${dx * .55}px, ${dy * .55}px) scale(1.06) rotateY(100deg)`, opacity: 1, offset: .6 },
-        { transform: `translate(${dx}px, ${dy}px) scale(1) rotateY(180deg)`, opacity: 1 },
+      // Move the card independently from its flip. Rotating both the wrapper
+      // and its faces made some browsers display the cover again on landing.
+      const movement = card.animate([
+        { transform: 'translate(0, 0) scale(.7)', opacity: .85 },
+        { transform: `translate(${dx * .55}px, ${dy * .55}px) scale(1.06)`, opacity: 1, offset: .6 },
+        { transform: `translate(${dx}px, ${dy}px) scale(1)`, opacity: 1 },
       ], { duration: 560, easing: 'cubic-bezier(.2,.7,.2,1)', fill: 'forwards' });
-      await Promise.race([animation.finished.catch(() => {}), new Promise(resolve => setTimeout(resolve, 750))]);
+      const flip = card.querySelector('.ai-flight-inner').animate([
+        { transform: 'rotateY(0deg)' },
+        { transform: 'rotateY(180deg)', offset: .75 },
+        { transform: 'rotateY(180deg)' },
+      ], { duration: 560, easing: 'ease-out', fill: 'forwards' });
+      await Promise.race([Promise.all([movement.finished, flip.finished]).catch(() => {}),
+        new Promise(resolve => setTimeout(resolve, 750))]);
       // The server already resolved this action. Only the public preview changes;
       // the authoritative discard and turn arrive in the final state render.
-      discard.src = cardArtPath(event.card);
-      discard.alt = event.card.replace('-', ' ');
+      shown.push(event.card);
+      const replacement = discardStack(shown);
+      discard.replaceWith(replacement);
+      discard = replacement;
     } catch (error) {
       // An animation API/display failure must never invalidate a move that the
       // server has already committed. The final render restores its true state.
@@ -307,7 +336,9 @@ async function perform(actor, command, args = {}) {
   }
   const result = await api(`/matches/${match.id}/actions`, {
     method: 'POST', body: JSON.stringify({ actor, command, args, revision: match.revision }) });
-  await animateAiPlays(recentAiPlays(match, result), result.players);
+  const aiPlays = recentAiPlays(match, result);
+  await animateAiPlays(aiPlays, result.players,
+    result.game === 'four-color' ? result.discard.slice(0, result.discard.length - aiPlays.length) : []);
   state.selected.clear(); state.lastCard = false; state.ready = false; state.plan = [];
   const solo = soloHumanId(result);
   const nextDecision = result.game === 'fourfold' ? result.players.find(p => p.kind === 'human' && !p.ready)?.id :
@@ -341,6 +372,7 @@ function table() {
   const m = state.match;
   if (!m) return section('No match selected.');
   if (m.game === 'fourfold') return fourfoldTable();
+  if (m.game !== 'four-color') return variantTable();
   const pendingId = m.outstanding?.find(x => m.players.find(p => p.id === x.player)?.kind === 'human')?.player;
   const current = m.players[m.current];
   if (state.matchSource === 'remote' && !m.winner && state.remote.seat !== (pendingId || current.id)) {
@@ -374,7 +406,7 @@ function table() {
         p.id === acting.id && !m.winner ? node('span', { class: 'turn-chip' }, 'NEXT') : null))),
     node('div', { class: 'playing-field' }, node('div', { class: 'piles' },
       node('div', { class: 'pile', 'data-pile': 'draw' }, image('cover'), node('span', {}, `Draw · ${m.draw_count}`)),
-      node('div', { class: 'pile', 'data-pile': 'discard' }, image(m.discard[m.discard.length - 1]), node('span', {}, 'Discard'))),
+      node('div', { class: 'pile', 'data-pile': 'discard' }, discardStack(m.discard), node('span', {}, 'Discard'))),
       node('div', { class: 'state-badges' }, node('span', { class: `color-dot ${m.active_color}` }),
         `Active ${m.active_color} · ${m.direction === 1 ? 'Clockwise ↻' : 'Counterclockwise ↺'}`,
         m.wild_rank == null ? '' : ` · Rank ${m.wild_rank}`,
@@ -401,6 +433,91 @@ function table() {
       : handoff ? null : section('Game completed. Return to Home or review another game.'),
     node('div', { class: 'events' }, title('Table history', 3),
       ...m.events.slice(-5).reverse().map(e => node('div', { class: 'event' }, e.type.replace('_', ' '),
+        e.player ? ` · ${e.player}` : '', e.card ? ` · ${e.card}` : ''))));
+}
+function variantTable() {
+  const m = state.match, completed = m.phase === 'complete';
+  const current = m.players[m.current];
+  const handoff = state.matchSource === 'local' && !completed && (!state.ready || state.viewer !== current.id);
+  const me = handoff ? null : m.players.find(p => p.id === state.viewer);
+  const collection = m.game === 'skip-bo' ? 'colors' : 'symbols';
+  const art = (token, extra = '') => token ? image(token.split('~')[0], extra, false, collection) :
+    node('div', { class: 'variant-empty' }, 'Empty');
+  const cardRow = (cards, className = 'variant-hand') => node('div', { class: className }, ...cards.map(c => art(c)));
+  const winnerNames = (m.winners || []).map(id => m.players.find(p => p.id === id)?.name || id);
+  const status = completed ? (winnerNames.length ? `Winner: ${winnerNames.join(' & ')}` : 'Round ended in a draw') : current.name;
+  function actionLabel(action) {
+    const a = action.args;
+    if (m.game === 'skip-bo') return action.command === 'build' ?
+      `Build ${a.pile + 1} from ${a.source}` : action.command === 'discard' ?
+        `Discard to pile ${a.pile + 1} · end turn` : 'Pass';
+    if (m.game === 'knuckles') return action.command === 'take' ?
+      `Take from ${a.source === 'stock' ? 'draw pile' : 'discard pile'}` :
+      action.command === 'discard' ? 'Discard this card · end turn' : 'Knock · last round';
+    return action.command === 'hit' ? 'Hit · draw one card' : 'Stand · keep this total';
+  }
+  const actions = (me ? m.legal_actions || [] : []).map(a => {
+    const token = a.args.card || (a.command === 'take' && a.args.source === 'discard' ? m.discard.at(-1) : null);
+    const tile = button('', () => task(() => perform(me.id, a.command, a.args)), { class: 'variant-action' });
+    if (token) tile.append(art(token));
+    tile.append(node('span', {}, actionLabel(a)));
+    return tile;
+  });
+  const heading = m.game === 'skip-bo' ? 'SKIP-BO' : m.game === 'knuckles' ? 'KNUCKLES' :
+    m.game === '21' ? '21 · COMPETITIVE' : 'BLACKJACK';
+  const content = [];
+  if (m.game === 'skip-bo') {
+    content.push(section(title('Shared building piles · 1 → 12', 3), node('div', { class: 'variant-piles' },
+      ...m.building.map((pile, i) => node('div', { class: 'variant-pile' },
+        node('span', { class: 'minor' }, `Build ${i + 1} · Next ${pile.length + 1}`),
+        art(pile.at(-1)?.card), node('small', {}, pile.length ? `Current: ${pile.at(-1).rank}` : 'Start at 1'))))));
+    content.push(section(title('Stock and personal discard piles', 3), node('div', { class: 'variant-players' },
+      ...m.players.map(p => node('div', { class: 'variant-player' }, node('b', {}, `${p.name} · Stock ${p.stock_count}`),
+        node('div', { class: 'variant-piles' }, node('div', { class: 'variant-pile' },
+          node('small', {}, 'Stock top'), art(p.stock_top)),
+        ...p.discards.map((token, i) => node('div', { class: 'variant-pile' }, node('small', {}, `Discard ${i + 1}`), art(token)))))))));
+    if (me) content.push(section(title(`${me.name}'s hand`, 3), cardRow(me.hand)));
+  } else if (m.game === 'knuckles') {
+    content.push(section(title('Draw and discard', 3),
+      node('div', { class: 'variant-piles' }, node('div', { class: 'variant-pile' },
+        node('small', {}, `Draw · ${m.draw_count}`), art('cover')),
+      node('div', { class: 'variant-pile' }, node('small', {}, 'Discard'), art(m.discard.at(-1))))));
+    if (m.knocker) content.push(section(node('b', {}, `${m.players.find(p => p.id === m.knocker)?.name || m.knocker} knocked!`),
+      node('p', { class: 'minor' }, `${m.remaining} final player turns remaining.`)));
+    if (me) content.push(section(title(`${me.name}'s hand · ${me.total} points (lower is better)`, 3), cardRow(me.hand)));
+    if (completed) content.push(section(title('Final scores', 3),
+      ...m.players.map(p => node('p', {}, `${p.name}: ${p.total} points`))));
+  } else {
+    if (m.game === 'blackjack') content.push(section(title('Dealer', 3),
+      node('div', { class: 'variant-piles' },
+        ...((completed ? m.dealer.hand : [m.dealer.upcard, 'cover']).filter(Boolean).map(token => art(token)))),
+      node('p', { class: 'minor' }, completed ? `Dealer total: ${m.dealer.total}` : 'One dealer card stays concealed until settlement')));
+    content.push(section(title('Players', 3), node('div', { class: 'variant-players' },
+      ...m.players.map(p => node('div', { class: 'variant-player' },
+        node('b', {}, `${p.name} · ${p.done ? 'Standing / done' : 'Playing'}`),
+        node('p', { class: 'minor' }, p.total == null ? `${p.count} private cards` :
+          `${p.total} points${p.total > 21 ? ' · BUST' : ''}`),
+        !handoff && (p.id === state.viewer || completed) && p.hand.length ? cardRow(p.hand) : null)))));
+  }
+  return node('div', { class: 'game-screen variant-screen' },
+    node('div', { class: 'row split' }, node('div', {}, node('span', { class: 'eyebrow' }, heading),
+      title(completed ? 'Game complete' : `${current.name}'s turn`, 2)),
+      node('div', { class: 'row' }, button('Rules', () => nav('help')),
+        button('Back to launcher', () => nav('home')))),
+    node('div', { class: 'turn-banner', role: 'status', 'aria-live': 'polite' },
+      node('div', {}, node('span', { class: 'turn-kicker' }, completed ? 'RESULT' : handoff ? 'NEXT PLAYER' : 'NEXT TO ACT'),
+        node('strong', {}, status)),
+      node('span', { class: 'turn-hint' }, completed ? 'Match finished' : handoff ?
+        'Reveal your cards when ready' : current.id === state.viewer ? 'Your move' : 'Waiting for this player')),
+    ...content,
+    handoff ? handoffPanel(m.game, current, m.game === 'skip-bo' ? 'hand and stock' : 'hand') : null,
+    !handoff && !completed ? section(title('Available moves', 3),
+      node('p', { class: 'minor' }, m.game === 'skip-bo' ?
+        'Select a legal card and destination below. Playing from your stock clears the pile needed to win.' :
+        'Only moves approved by the game rules are shown.'), node('div', { class: 'variant-actions' }, ...actions)) : null,
+    completed ? section(title(status, 3), button('Return to launcher', () => nav('home'), { class: 'primary' })) : null,
+    node('div', { class: 'events' }, title('Table history', 3),
+      ...m.events.slice(-8).reverse().map(e => node('div', { class: 'event' }, e.type.replaceAll('_', ' '),
         e.player ? ` · ${e.player}` : '', e.card ? ` · ${e.card}` : ''))));
 }
 function fourfoldTable() {
@@ -503,13 +620,37 @@ function stats() {
     node('div', { class: 'saved-grid' }, ...state.saved.map(savedTile)));
 }
 function help() {
+  const game = state.match?.game || state.setup.game;
+  if (game === 'skip-bo') return node('div', { class: 'narrow' }, title('How to play Skip-Bo', 1),
+    section(title('Objective', 3), node('p', {}, 'Be first to empty your personal stockpile.'),
+      title('Cards', 3), node('p', {}, 'The 162-card deck uses repeated digital instances of the existing colored 1–12 and Wild faces. Card colors have no effect; Wild can represent any required number.'),
+      title('Your turn', 3), node('p', {}, 'Start with a five-card hand. Build up to four common piles in ascending order from 1 through 12, using your hand, the top of your stockpile, or the top of your own four discard piles.'),
+      title('End turn', 3), node('p', {}, 'Discard one hand card to one of your four personal discard piles. Clearing your hand refills it; completing a pile at 12 makes its cards available for recycling.'),
+      node('p', { class: 'minor' }, '2–4 players: 30 stock cards each. 5–6 players: 20. The artwork is original; Skip-Bo is a Mattel trademark.')),
+    button('Back to table', returnFromRules));
+  if (game === '21' || game === 'blackjack') return node('div', { class: 'narrow' }, title(`How to play ${game === '21' ? 'Competitive 21' : 'Blackjack'}`, 1),
+    section(title('Card values', 3), node('p', {}, 'Aces count as 1 or 11. Number cards count at face value; J, Q and K count as 10. Go over 21 and you bust.'),
+      title('Your turn', 3), node('p', {}, 'Choose Hit to draw a card or Stand to keep your total. A 52-card suit deck is used without action cards or wagers.'),
+      title('How it differs', 3), node('p', {}, game === '21' ?
+        'Competitive 21 is an explicitly defined house variant: players compare totals directly. The highest total at or below 21 wins; ties share the win. There is no dealer.' :
+        'In Blackjack, all players compare against a fixed dealer. The dealer hits below 17 and stands on every 17. Two-card natural Blackjack beats an ordinary 21; ties with the dealer are pushes.'),
+      node('p', { class: 'minor' }, 'This is one no-wager round; betting, splitting and doubling are not included.')),
+    button('Back to table', returnFromRules));
+  if (game === 'knuckles') return node('div', { class: 'narrow' }, title('How to play Knuckles', 1),
+    section(title('Goal', 3), node('p', {}, 'Have the lowest sum across five cards at the end of the round.'),
+      title('Card values', 3), node('p', {}, 'A=1, J=0, Q=10, K=10, and 2–10 at face value.'),
+      title('Turns', 3), node('p', {}, 'Take a card from the draw pile or top discard, then choose one card to discard. You always end with five cards.'),
+      title('Knock', 3), node('p', {}, 'Instead of drawing, knock to give every other player one final turn. The lowest total wins; tied lows share the win.'),
+      node('p', { class: 'minor' }, 'Five-card low-score ruleset; no physical forfeit or punishment mechanics.')),
+    button('Back to table', returnFromRules));
   return node('div', { class: 'narrow' }, title('How to play Four-Color', 1),
     section(title('Objective', 3), node('p', {}, 'Be first to discard every card. Everyone starts with seven cards.'),
       title('Match', 3), node('p', {}, 'Play a matching color, rank, letter or action. Neutral cards let you choose the next color.'),
       title('Your turn', 3), node('p', {}, 'Play one legal card or draw one. Only the drawn card can be played immediately.'),
       title('Special actions', 3), node('p', {}, 'Draw penalties, Skip, Reverse, Stop, Verdict, Equality, Swap, Steal, Cycle and Wild follow the prototype rules.'),
       title('Finish', 3), node('p', {}, 'Call LAST CARD when one card remains. Playing your final card wins before its action occurs.'),
-      node('p', { class: 'minor' }, 'Prototype v1.0: Cycle and some rule parameters remain provisional.')));
+      node('p', { class: 'minor' }, 'Prototype v1.0: Cycle and some rule parameters remain provisional.')),
+    button('Back to table', returnFromRules));
 }
 function onlinePage() {
   const serverInput = node('input', { type: 'url', placeholder: 'https://cards.example.com:8775',

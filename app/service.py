@@ -11,6 +11,7 @@ from typing import Any
 
 from .game import GameError, Match
 from .fourfold import FourfoldMatch
+from .variants import ENGINES, VariantMatch, new_variant
 from .assets import AssetRegistry
 from slai.bridge.agents import CardAgentBridge
 
@@ -166,14 +167,22 @@ class CardGamesService:
 
     def catalog(self) -> list[dict[str, Any]]:
         color_ready = self.assets.inspect("colors")["status"] == "complete"
+        skip_ready = self.assets.inspect("colors")["game_subsets"]["skip-bo"]["ready"]
+        standard_ready = self.assets.inspect("symbols")["game_subsets"]["blackjack"]["ready"]
         return [
             {"id": "four-color", "title": "Four-Color", "description": "Match colors, ranks and actions in a tactical 2–8 player card game.",
              "image": "/assets/colors/cover.jpg", "players": "2–8", "status": "playable" if color_ready else "assets-missing", "asset_set": "colors"},
             {"id": "fourfold", "title": "Fourfold Mandate", "description": "12 rounds of secret orders, estate contests and deterministic scoring.",
              "image": "/assets/fourfold/cover.jpg", "players": "2–6", "status": "playable", "asset_set": "fourfold",
              "asset_warning": self.assets.inspect("fourfold")["missing"]},
-            {"id": "symbols", "title": "Symbol-based games", "description": "Reusable suit card family; deck/rules mapping awaiting approval.",
-             "image": "/assets/symbols/cover.jpg", "players": "Variant pending", "status": "rules-pending", "asset_set": "symbols"},
+            {"id": "skip-bo", "title": "Skip-Bo", "description": "Build shared sequences from 1 to 12; clear your stockpile using number and Wild cards.",
+             "image": "/assets/colors/cover.jpg", "players": "2–6", "status": "playable" if skip_ready else "assets-missing", "asset_set": "colors"},
+            {"id": "21", "title": "21 · Competitive", "description": "A no-dealer, no-wager closest-to-21 variant; draw or stand and compare totals.",
+             "image": "/assets/symbols/cover.jpg", "players": "2–6", "status": "playable" if standard_ready else "assets-missing", "asset_set": "symbols"},
+            {"id": "blackjack", "title": "Blackjack", "description": "Beat a fixed dealer without busting; dealer stands on all 17s. No wagers.",
+             "image": "/assets/symbols/cover.jpg", "players": "2–6", "status": "playable" if standard_ready else "assets-missing", "asset_set": "symbols"},
+            {"id": "knuckles", "title": "Knuckles · Five-card", "description": "Keep the lowest total; draw, discard and knock to end the round.",
+             "image": "/assets/symbols/cover.jpg", "players": "2–6", "status": "playable" if standard_ready else "assets-missing", "asset_set": "symbols"},
         ]
 
     def create(self, owner: str, participants: list[dict[str, str]], seed: int | None = None,
@@ -183,9 +192,11 @@ class CardGamesService:
         difficulty = difficulty or self.preferences(owner)["difficulty"]
         if difficulty not in ("easy", "medium", "hard", "expert"):
             raise GameError("Invalid AI difficulty")
-        if game not in ("four-color", "fourfold"):
+        if game not in ("four-color", "fourfold", *ENGINES):
             raise GameError("Game rules are not available")
-        match = (Match if game == "four-color" else FourfoldMatch).new(participants, seed=seed)
+        match = (Match.new(participants, seed=seed) if game == "four-color" else
+                 FourfoldMatch.new(participants, seed=seed) if game == "fourfold" else
+                 new_variant(game, participants, seed=seed))
         match.state["ai_difficulty"] = difficulty
         with self._lock, self.db.transaction():
             self._run_ai(match)
@@ -193,22 +204,25 @@ class CardGamesService:
         viewer = next((p["id"] for p in participants if p.get("kind", "human") == "human"), None)
         return match.view(viewer)
 
-    def _save(self, owner: str, match: Match | FourfoldMatch) -> None:
+    def _save(self, owner: str, match: Match | FourfoldMatch | VariantMatch) -> None:
         self.db.execute("INSERT INTO matches(id,owner,data,revision,completed) VALUES(?,?,?,?,?) "
                         "ON CONFLICT(id) DO UPDATE SET data=excluded.data,revision=excluded.revision,completed=excluded.completed",
                         (match.state["id"], owner, json.dumps(match.state, separators=(",", ":")),
                          match.state["revision"], int(self._complete(match))))
 
-    def _load(self, owner: str, match_id: str) -> Match | FourfoldMatch:
+    def _load(self, owner: str, match_id: str) -> Match | FourfoldMatch | VariantMatch:
         row = self.db.row("SELECT data FROM matches WHERE owner=? AND id=?", (owner, match_id))
         if row is None:
             raise GameError("Match not found")
         state = json.loads(row["data"])
-        return (FourfoldMatch if state.get("game") == "fourfold" else Match).from_state(state)
+        klass = ({"four-color": Match, "fourfold": FourfoldMatch, **ENGINES}).get(state.get("game"))
+        if klass is None:
+            raise GameError("Unsupported saved game")
+        return klass.from_state(state)
 
     @staticmethod
-    def _complete(match: Match | FourfoldMatch) -> bool:
-        return match.state["phase"] == "complete" if match.state["game"] == "fourfold" else match.state["winner"] is not None
+    def _complete(match: Match | FourfoldMatch | VariantMatch) -> bool:
+        return match.state["phase"] == "complete" if match.state["game"] != "four-color" else match.state["winner"] is not None
 
     def get(self, owner: str, match_id: str, viewer: str | None) -> dict[str, Any]:
         with self._lock:
@@ -240,8 +254,8 @@ class CardGamesService:
         duration = []
         for row in rows:
             match = json.loads(row["data"])
-            winners = match.get("winners", []) if match["game"] == "fourfold" else [match.get("winner")]
-            if not any(winners):
+            winners = match.get("winners", []) if match["game"] != "four-color" else [match.get("winner")]
+            if not (match["phase"] == "complete" if match["game"] != "four-color" else any(winners)):
                 continue
             complete += 1
             for winner in winners:
@@ -276,12 +290,23 @@ class CardGamesService:
             self._save(owner, match)
             return match.view(actor)
 
-    def _run_ai(self, match: Match | FourfoldMatch, max_steps: int = 200) -> None:
+    def _run_ai(self, match: Match | FourfoldMatch | VariantMatch, max_steps: int = 200) -> None:
         if match.state["game"] == "fourfold":
             for p in match.state["players"]:
                 if p["kind"] == "ai" and p["orders"] is None and match.state["phase"] == "plan":
                     self.agent.difficulty = match.state.get("ai_difficulty", "medium")
                     match.act(p["id"], "submit", orders=self.agent.fourfold_orders(match, p["id"]))
+            return
+        if isinstance(match, VariantMatch):
+            for _ in range(max_steps):
+                if match.state["phase"] == "complete":
+                    return
+                player = match.state["players"][match.state["current"]]
+                if player["kind"] != "ai":
+                    return
+                self.agent.difficulty = match.state.get("ai_difficulty", "medium")
+                action = self.agent.variant_action(match, player["id"])
+                match.act(player["id"], action["command"], **action["args"])
             return
         for _ in range(max_steps):
             if match.state["winner"] is not None:

@@ -12,6 +12,7 @@ import threading
 from app.fourfold import FourfoldMatch, SUITS, card_cost
 
 from app.game import CARDS, COLORS, Match
+from app.variants import VariantMatch, face, knuckles_value
 
 
 class CardAgentBridge:
@@ -45,6 +46,9 @@ class CardAgentBridge:
 
                 def choose_fourfold_orders(self, observation: dict[str, Any]) -> dict[str, Any]:
                     return {"orders": rank_fourfold_orders(observation, observation.get("difficulty", "medium"))}
+
+                def choose_variant_action(self, observation: dict[str, Any]) -> dict[str, Any]:
+                    return {"action": rank_variant_action(observation)}
 
             factory = AgentFactory()
             self._agent = CardGameAgent(shared_memory=None, agent_factory=factory)
@@ -129,6 +133,73 @@ class CardAgentBridge:
     def selection(self, match: Match, player_id: str, count: int) -> list[str]:
         player = next(p for p in match.state["players"] if p["id"] == player_id)
         return player["hand"][:count]
+
+    def variant_action(self, match: VariantMatch, player_id: str) -> dict[str, Any]:
+        observation = match.view(player_id)
+        observation["difficulty"] = self.difficulty
+        result = self._bounded("choose_variant_action", observation)
+        available = observation["legal_actions"]
+        suggestion = result.get("action") if isinstance(result, dict) else None
+        if isinstance(suggestion, dict) and suggestion in available:
+            return suggestion
+        self.status = "fallback"
+        self.last_diagnostic = "Variant decision unavailable/invalid; validated deterministic action used"
+        return rank_variant_action(observation)
+
+
+def rank_variant_action(observation: dict[str, Any]) -> dict[str, Any]:
+    """Constrained public/own-hand policy; no access to opponent private cards."""
+    actions = observation.get("legal_actions") or []
+    if not actions:
+        raise ValueError("No legal variant action")
+    game = observation["game"]
+    me = observation["players"][observation["current"]]
+    difficulty = observation.get("difficulty", "medium")
+    if game == "skip-bo":
+        builds = [a for a in actions if a["command"] == "build"]
+        if builds:
+            if difficulty == "easy":
+                return builds[0]
+            if difficulty == "expert":
+                # Preserve wilds where possible; clear stock cards first.
+                return min(builds, key=lambda a: (0 if a["args"]["source"] == "stock" else
+                                                  1 if a["args"]["source"].startswith("discard:") else 2,
+                                                  face(a["args"]["card"]).startswith("Wild-"),
+                                                  a["args"]["pile"]))
+            return min(builds, key=lambda a: (0 if a["args"]["source"] == "stock" else
+                                              1 if a["args"]["source"] == "hand" else 2,
+                                              a["args"]["pile"], a["args"]["card"]))
+        if difficulty == "easy":
+            return actions[0]
+        return max(actions, key=lambda a: (a["command"] == "discard",
+                                           int(face(a["args"].get("card", "00-blue")).split("-")[0])
+                                           if a["command"] == "discard" and not face(a["args"]["card"]).startswith("Wild-") else 0))
+    if game in ("21", "blackjack"):
+        score = me["total"]
+        threshold = {"easy": 13, "medium": 16, "hard": 17, "expert": 18}.get(difficulty, 16)
+        if difficulty == "expert" and game == "blackjack" and score is not None:
+            upcard = observation.get("dealer", {}).get("upcard")
+            dealer_rank = face(upcard).split("-", 1)[0] if upcard else None
+            dealer_value = (11 if dealer_rank == "A" else 10 if dealer_rank in ("J", "Q", "K") else
+                            int(dealer_rank) if dealer_rank and dealer_rank.isdigit() else 10)
+            # A cautious no-wager policy, not a claim of optimal basic strategy.
+            threshold = 12 if dealer_value in (4, 5, 6) else 17
+        desired = "hit" if score is not None and score < threshold else "stand"
+        return next((a for a in actions if a["command"] == desired), actions[0])
+    if game == "knuckles":
+        if observation["step"] == "take":
+            threshold = {"easy": -1, "medium": -1, "hard": 7, "expert": 6}.get(difficulty, -1)
+            if me["total"] is not None and me["total"] <= threshold and not observation["knocker"]:
+                return next((a for a in actions if a["command"] == "knock"), actions[0])
+            if difficulty == "expert":
+                top = observation.get("discard", [])
+                if top and knuckles_value(top[-1]) < max(map(knuckles_value, me.get("hand", [])), default=-1):
+                    return next((a for a in actions if a["args"].get("source") == "discard"), actions[0])
+            return next((a for a in actions if a["args"].get("source") == "stock"), actions[0])
+        if difficulty == "easy":
+            return actions[0]
+        return max(actions, key=lambda a: (knuckles_value(a["args"]["card"]), a["args"]["card"]))
+    return actions[0]
 
 
 def rank_legal_card(observation: dict[str, Any]) -> str:

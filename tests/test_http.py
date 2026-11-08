@@ -51,8 +51,17 @@ class SharedServerTests(unittest.TestCase):
         catalog = self.request("/api/catalog")
         self.assertEqual(catalog[0]["status"], "playable")
         self.assertEqual(catalog[1]["status"], "playable")
-        self.assertEqual(catalog[2]["status"], "rules-pending")
+        self.assertEqual([entry["id"] for entry in catalog],
+                         ["four-color", "fourfold", "skip-bo", "21", "blackjack", "knuckles"])
+        self.assertTrue(all(entry["status"] == "playable" for entry in catalog))
         self.assertEqual(self.request("/api/assets")[0]["faces"], 119)
+        asset_report = {entry["collection"]: entry for entry in self.request("/api/assets")}
+        self.assertTrue(asset_report["colors"]["game_subsets"]["skip-bo"]["ready"])
+        self.assertEqual(asset_report["colors"]["game_subsets"]["skip-bo"]["faces"], 52)
+        self.assertEqual(asset_report["colors"]["game_subsets"]["skip-bo"]["instances"], 162)
+        for game in ("21", "blackjack", "knuckles"):
+            self.assertTrue(asset_report["symbols"]["game_subsets"][game]["ready"])
+            self.assertEqual(asset_report["symbols"]["game_subsets"][game]["faces"], 52)
         match = self.request("/api/matches", {"difficulty": "hard", "participants": [
             {"id": "me", "name": "Me", "kind": "human"}, {"id": "bot", "name": "SLAI", "kind": "ai"}]})
         self.assertEqual(match["ai_difficulty"], "hard")
@@ -94,6 +103,33 @@ class SharedServerTests(unittest.TestCase):
             "actor": "me", "command": "submit", "revision": match["revision"], "args": {"orders": []}})
         self.assertEqual(result["round"], 2)
         self.assertTrue(result["players"][1]["ready"])
+
+    def test_new_game_families_use_authoritative_http_and_recovery(self):
+        for game in ("skip-bo", "21", "blackjack", "knuckles"):
+            with self.subTest(game=game):
+                match = self.request("/api/matches", {"game": game, "difficulty": "expert", "participants": [
+                    {"id": "me", "kind": "human"}, {"id": "agent", "kind": "ai"}]})
+                self.assertEqual(match["game"], game)
+                if match["phase"] == "play":
+                    self.assertEqual(match["players"][1]["hand"], [])
+                recovered = self.request(f"/api/matches/{match['id']}?viewer=me")
+                self.assertEqual(recovered["revision"], match["revision"])
+                self.assertEqual(recovered["legal_actions"], match["legal_actions"])
+                with self.assertRaises(HTTPError) as denied:
+                    self.request(f"/api/matches/{match['id']}/actions", {
+                        "actor": "agent", "revision": match["revision"], "command": "hit", "args": {}})
+                self.assertEqual(denied.exception.code, 400)
+                if match["phase"] == "play":
+                    action = match["legal_actions"][0]
+                    updated = self.request(f"/api/matches/{match['id']}/actions", {
+                        "actor": "me", "revision": match["revision"], **action})
+                    self.assertGreater(updated["revision"], match["revision"])
+                    if updated["phase"] == "play":
+                        self.assertEqual(updated["players"][1]["hand"], [])
+                    with self.assertRaises(HTTPError) as stale:
+                        self.request(f"/api/matches/{match['id']}/actions", {
+                            "actor": "me", "revision": match["revision"], **action})
+                    self.assertEqual(stale.exception.code, 400)
 
     def test_settings_roundtrip_and_security_marker(self):
         settings = self.request("/api/settings")
