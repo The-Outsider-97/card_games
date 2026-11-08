@@ -9,6 +9,7 @@ A local-first desktop-style launcher for original card games, powered by SLAI's 
 - Four-Color v1.0 prototype: 119-face color deck, 2–8 seats, documented action rules, turn validation, draw/recycle, one-card turns, pending selections, last-card challenge, winner detection.
 - **Fourfold Mandate First Edition v1.0**: 2–6 players, 56 cards per player, 12 rounds of simultaneously committed orders, exact-match targets, CP/Treasury economics, Foundations, Jack/Queen/King abilities, estate contests, seals, era rewards, set bonuses and tie breakers. See [Fourfold rules and artwork register](doc/FOURFOLD.md).
 - Local human and AI seats, including mixed matches and hot-seat privacy screens.
+- Compact, in-table hot-seat handoffs with card-flip/reveal animations. Solo-human matches against SLAI opponents continue without a pointless pass-the-device prompt. Motion honors both the SLAI preference and OS reduced-motion settings.
 - Browser launcher, game cards, setup, table, settings, recent matches and history.
 - SQLite match recovery and preferences through `applications.tools.database.Database`.
 - SLAI's hardened loopback server and shared CSS (`applications/tools`).
@@ -62,6 +63,7 @@ Other options: `--no-browser`, `--data-dir`, `--host` (loopback only), `--token`
 ```powershell
 cd G:\GAIA\AI\card_games
 python -m unittest discover -s tests -v
+node tests/test_handoff.cjs
 ```
 
 For tests of the actual shared SLAI HTTP toolkit, add the SLAI checkout root to `PYTHONPATH` (or run from a development environment where `applications.tools` is importable). Tests without it will skip the shared-server integration module.
