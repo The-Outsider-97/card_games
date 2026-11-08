@@ -106,6 +106,19 @@ class SharedServerTests(unittest.TestCase):
                                       headers={"Content-Type": "application/json"}))
         self.assertEqual(raised.exception.code, 401)
 
+    def test_plus_action_art_uses_existing_unmodified_card_images(self):
+        # SLAI's generic static allowlist excludes '+'. Card Games provides a
+        # whitelisted alias without renaming or duplicating the original files.
+        for face in ("+1-blue", "+2-neutral", "+4-red", "+5-yellow"):
+            alias = "plus" + face[1:]
+            response = self.browser.open(self.base + f"/api/card-art/{alias}")
+            self.assertEqual(response.headers.get_content_type(), "image/jpeg")
+            self.assertEqual(response.read(), (ROOT / "cards" / "colors" / f"{face}.jpg").read_bytes())
+        for invalid in ("plus99-blue", "plus5-purple", "cover", "plus5-yellow.jpg"):
+            with self.subTest(invalid=invalid), self.assertRaises(HTTPError) as rejected:
+                self.browser.open(self.base + f"/api/card-art/{invalid}")
+            self.assertEqual(rejected.exception.code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

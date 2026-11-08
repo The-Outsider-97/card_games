@@ -7,6 +7,7 @@ const vm = require('node:vm');
 class FakeNode {
   constructor(tag = '') {
     this.tag = tag; this.children = []; this.attributes = {}; this.handlers = {}; this.className = ''; this.textContent = '';
+    this.style = {};
     this.classList = {
       add: cls => { this.className = [...new Set([...this.className.split(' ').filter(Boolean), cls])].join(' '); },
       remove: cls => { this.className = this.className.split(' ').filter(name => name !== cls).join(' '); },
@@ -17,6 +18,8 @@ class FakeNode {
   addEventListener(event, callback) { this.handlers[event] = callback; }
   setAttribute(key, value) { this.attributes[key] = String(value); }
   getAttribute(key) { return this.attributes[key]; }
+  getBoundingClientRect() { return { left: 100, top: 100, width: 120, height: 145 }; }
+  animate(keyframes, options) { FakeNode.lastAnimation = { keyframes, options }; return { finished: Promise.resolve() }; }
   remove() {}
 }
 function flatten(node) {
@@ -46,8 +49,12 @@ const context = vm.createContext({ Node: FakeNode, document,
   setTimeout, console, URL, sessionStorage: { getItem: () => null } });
 const filename = path.join(__dirname, '..', 'src', 'client', 'app.js');
 const app = fs.readFileSync(filename, 'utf8').split('\ninitialize();')[0];
-vm.runInContext(`${app}\n globalThis.ui = {state, table, fourfoldTable, render, perform, soloHumanId};`, context, { filename });
-const { state, table, fourfoldTable, render, perform, soloHumanId } = context.ui;
+vm.runInContext(`${app}\n globalThis.ui = {state, table, fourfoldTable, render, perform, soloHumanId, cardArtPath, choose, recentAiPlays, animateAiPlays};`, context, { filename });
+const { state, table, fourfoldTable, render, perform, soloHumanId, cardArtPath, choose, recentAiPlays, animateAiPlays } = context.ui;
+
+assert.equal(cardArtPath('+5-yellow'), '/api/card-art/plus5-yellow');
+assert.equal(cardArtPath('+2-neutral'), '/api/card-art/plus2-neutral');
+assert.equal(cardArtPath('08-red'), '/assets/colors/08-red.jpg');
 
 const score = () => ({ hearts: 0, diamonds: 0, clubs: 0, spades: 0 });
 const players = [
@@ -103,7 +110,18 @@ context.fetch = async () => ({ ok: true, status: 200,
   const colorView = flatten(table());
   assert.match(colorView, /Discard/);
   assert.match(colorView, /Player 1, you're up/);
+  assert.match(colorView, /NEXT PLAYER/);
   assert.doesNotMatch(colorView, /PRIVATE_SECRET_CARD/);
+
+  const selectedCard = choose('Take an earlier discard', [['+5-yellow', '+5-yellow'], ['06-green', '06-green']],
+    { cards: true, cancel: true });
+  const picker = find(document.body, 'modal-card-choice');
+  assert.ok(picker, 'Steal should show a visual card picker');
+  const firstCard = find(picker, 'card-choice');
+  assert.equal(find(firstCard, 'art-fallback'), null);
+  assert.match(flatten(firstCard), /api\/card-art\/plus5-yellow/);
+  firstCard.handlers.click();
+  assert.equal(await selectedCard, '+5-yellow');
 
   const solo = { ...publicFourfold, id: 'solo-test', round: 4, players: [
     { ...players[0], available: ['04-hearts'] },
@@ -140,5 +158,25 @@ context.fetch = async () => ({ ok: true, status: 200,
   await flipPromise;
   assert.equal(fetchedDuringFlip, true);
   assert.equal(state.viewer, 'h1');
-  console.log('Handoff DOM checks passed: public board persists and hands stay concealed until reveal.');
+
+  // The server is authoritative; replay only new public AI play events.
+  const oldTurn = { game: 'four-color', revision: 8, events: [{ type: 'play', player: 'h1', card: '01-blue' }] };
+  const nextTurn = { ...oldTurn, revision: 10, events: [
+    ...oldTurn.events, { type: 'play', player: 'h1', card: '03-red' },
+    { type: 'play', player: 'ai', card: '+5-green' }, { type: 'turn', player: 'h1' },
+  ], players: [{ id: 'h1', name: 'Human', kind: 'human' }, { id: 'ai', name: 'SLAI 1', kind: 'ai' }] };
+  const aiPlays = recentAiPlays(oldTurn, nextTurn);
+  assert.equal(aiPlays.length, 1);
+  assert.equal(aiPlays[0].card, '+5-green');
+  assert.equal(recentAiPlays(nextTurn, nextTurn).length, 0, 'No duplicate animation on stale revisions');
+  const discard = new FakeNode('img');
+  discard.setAttribute('src', cardArtPath('01-blue'));
+  const field = new FakeNode('div');
+  document.querySelector = selector => selector.includes('discard') ? discard : field;
+  document.querySelectorAll = () => [];
+  await animateAiPlays(aiPlays, nextTurn.players);
+  assert.equal(discard.src, '/api/card-art/plus5-green', 'An AI play should land on the visible discard pile');
+  assert.equal(FakeNode.lastAnimation.options.duration, 560);
+  assert.match(FakeNode.lastAnimation.keyframes.at(-1).transform, /rotateY\(180deg\)/);
+  console.log('Card Games DOM checks passed: handoffs, card art, Steal picker, next player, and AI plays.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
