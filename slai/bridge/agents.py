@@ -163,11 +163,13 @@ def rank_variant_action(observation: dict[str, Any]) -> dict[str, Any]:
             if difficulty == "expert":
                 # Preserve wilds where possible; clear stock cards first.
                 return min(builds, key=lambda a: (0 if a["args"]["source"] == "stock" else
-                                                  1 if a["args"]["source"].startswith("discard:") else 2,
+                                                  1 if a["args"]["source"] == "partner_stock" else
+                                                  2 if "discard:" in a["args"]["source"] else 3,
                                                   face(a["args"]["card"]).startswith("Wild-"),
                                                   a["args"]["pile"]))
             return min(builds, key=lambda a: (0 if a["args"]["source"] == "stock" else
-                                              1 if a["args"]["source"] == "hand" else 2,
+                                              1 if a["args"]["source"] == "partner_stock" else
+                                              2 if a["args"]["source"] == "hand" else 3,
                                               a["args"]["pile"], a["args"]["card"]))
         if difficulty == "easy":
             return actions[0]

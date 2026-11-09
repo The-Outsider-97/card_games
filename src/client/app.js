@@ -2,7 +2,7 @@
 const base = '/api';
 const state = { page: 'home', catalog: [], saved: [], stats: {}, prefs: {}, match: null, viewer: null,
   selected: new Set(), lastCard: false, ready: false, plan: [],
-  setup: { game: 'four-color', humans: 1, ai: 2, difficulty: 'medium' },
+  setup: { game: 'four-color', humans: 1, ai: 2, difficulty: 'medium', shortGame: false, partnership: false },
   account: { username: 'Guest', status: 'guest', available: 'false' }, profile: { display_name: 'Guest', avatar: 'initials' },
   authMode: 'login', remote: null, invite: null, matchSource: 'local',
   handoffBusy: false, revealAnimation: false, justSelectedCard: null };
@@ -65,6 +65,20 @@ function nav(page) {
   state.revealAnimation = false; state.selected.clear(); render();
 }
 function returnFromRules() { state.page = 'table'; render(); }
+async function playAgain() {
+  if (!state.match || state.matchSource !== 'local') throw new Error('Replay is available for completed local matches.');
+  const next = await api(`/matches/${state.match.id}/rematch`, { method: 'POST' });
+  state.match = next; state.viewer = null; state.ready = false;
+  state.plan = []; state.selected.clear(); state.lastCard = false;
+  state.matchSource = 'local'; state.page = 'table';
+  const solo = soloHumanId(next);
+  if (solo) { state.viewer = solo; state.ready = true; state.revealAnimation = motionEnabled(); }
+  [state.saved, state.stats] = await Promise.all([api('/matches'), api('/stats')]);
+}
+function replayButton() {
+  return state.matchSource === 'local' ? button('Play again', () => task(playAgain), { class: 'primary' }) :
+    button('Create another online room', () => nav('online'), { class: 'primary' });
+}
 function shell(content) {
   const app = node('div', { class: 'shell' });
   const sidebar = node('aside', { class: 'sidebar' },
@@ -130,6 +144,7 @@ function games() { return node('div', {}, node('span', { class: 'eyebrow' }, 'TH
 function setup() {
   const humans = state.setup.humans, ai = state.setup.ai;
   const fourfold = state.setup.game === 'fourfold';
+  const skipBo = state.setup.game === 'skip-bo';
   const limit = state.setup.game === 'four-color' ? 8 : 6;
   function numberInput(label, key, max) {
     return node('label', { class: 'form-field' }, node('span', {}, label), node('input', {
@@ -146,14 +161,27 @@ function setup() {
         node('select', { onChange: event => { state.setup.difficulty = event.target.value; } },
           ...['easy', 'medium', 'hard', 'expert'].map(d => node('option', { value: d,
             ...(d === state.setup.difficulty ? { selected: '' } : {}) }, d)))),
+      skipBo ? node('div', { class: 'form-grid' },
+        node('label', { class: 'row motion-setting' }, node('input', { type: 'checkbox', checked: state.setup.shortGame,
+          onChange: event => { state.setup.shortGame = event.target.checked; render(); } }),
+        node('span', {}, 'Short game · 10 stock cards per player')),
+        node('label', { class: 'row motion-setting' }, node('input', { type: 'checkbox', checked: state.setup.partnership,
+          onChange: event => { state.setup.partnership = event.target.checked; render(); } }),
+        node('span', {}, 'Partnerships · 4 or 6 players, alternating seats')),
+        state.setup.partnership ? node('p', { class: 'minor' }, 'Team members share access to each other’s visible stock and discard tops. Each team must clear both stockpiles.') : null) : null,
       node('div', { class: 'row' }, button('Back', () => nav('games')),
         button('Start match', () => task(async () => {
           if (humans + ai < 2 || humans + ai > limit) throw new Error(`Choose between 2 and ${limit} players.`);
+          if (skipBo && state.setup.partnership && ![4, 6].includes(humans + ai))
+            throw new Error('Partnership Skip-Bo requires four or six players.');
           const participants = [
             ...Array.from({ length: humans }, (_, i) => ({ id: `human${i + 1}`, name: `Player ${i + 1}`, kind: 'human' })),
             ...Array.from({ length: ai }, (_, i) => ({ id: `ai${i + 1}`, name: `SLAI ${i + 1}`, kind: 'ai' })),
           ];
-          state.match = await api('/matches', { method: 'POST', body: JSON.stringify({ game: state.setup.game, participants, difficulty: state.setup.difficulty }) });
+          state.match = await api('/matches', { method: 'POST', body: JSON.stringify({
+            game: state.setup.game, participants, difficulty: state.setup.difficulty,
+            ...(skipBo ? { options: { short_game: state.setup.shortGame, partnership: state.setup.partnership } } : {}),
+          }) });
           state.viewer = null; state.ready = false; state.plan = []; state.page = 'table'; state.matchSource = 'local';
           const onlyHuman = soloHumanId(state.match);
           if (onlyHuman) { state.viewer = onlyHuman; state.ready = true; state.revealAnimation = motionEnabled(); }
@@ -237,12 +265,49 @@ function handoffPanel(game, next, label) {
       node('div', { class: 'row handoff-actions' }, confirm,
         button('Return home', () => nav('home'), { class: 'subtle' }))));
 }
-async function animatePlayedCard(card) {
-  if (!motionEnabled()) return;
-  const selected = [...document.querySelectorAll('[data-card]')].find(el => el.getAttribute('data-card') === card);
-  if (!selected) return;
-  selected.classList.add('is-playing');
-  await new Promise(resolve => setTimeout(resolve, 260));
+async function animatePlayedCard(card, target, collection = 'colors') {
+  const source = [...document.querySelectorAll('[data-card]')].find(el => el.getAttribute('data-card') === card);
+  if (!source || !target || !motionEnabled()) return;
+  await cardFlight({ source, target, card: card.split('~')[0], collection, reveal: false });
+}
+async function cardFlight({ source, target, card, collection = 'colors', reveal = true, label = '' }) {
+  // A presentation-only animation: server state has already been validated.
+  // The entire card moves; only the inner faces rotate, ending face-up.
+  if (!source || !target || !card || !motionEnabled() || state.page !== 'table') return;
+  const start = source.getBoundingClientRect(), end = target.getBoundingClientRect();
+  const width = 90, height = 128;
+  const fromX = start.left + (start.width - width) / 2, fromY = start.top + (start.height - height) / 2;
+  const dx = end.left + (end.width - width) / 2 - fromX;
+  const dy = end.top + (end.height - height) / 2 - fromY;
+  const flight = node('div', { class: `ai-flight-card ${reveal ? '' : 'face-up-flight'}` },
+    node('div', { class: 'ai-flight-inner' },
+      node('div', { class: 'ai-flight-back' }, image('cover', '', true, collection)),
+      node('div', { class: 'ai-flight-front' }, image(card, '', true, collection))));
+  flight.style.left = `${fromX}px`; flight.style.top = `${fromY}px`;
+  const overlay = node('div', { class: 'ai-flight-overlay', 'aria-live': 'polite' },
+    label ? node('div', { class: 'ai-flight-label' }, label) : null, flight);
+  document.body.append(overlay);
+  try {
+    const movement = flight.animate([
+      { transform: 'translate(0, 0) scale(.78)', opacity: .9 },
+      { transform: `translate(${dx * .58}px, ${dy * .58}px) scale(1.05)`, opacity: 1, offset: .58 },
+      { transform: `translate(${dx}px, ${dy}px) scale(1)`, opacity: 1 },
+    ], { duration: 540, easing: 'cubic-bezier(.22,.8,.25,1)', fill: 'forwards' });
+    const motions = [movement.finished];
+    if (reveal) {
+      const flip = flight.querySelector('.ai-flight-inner').animate([
+        { transform: 'rotateY(0deg)' },
+        { transform: 'rotateY(180deg)', offset: .78 },
+        { transform: 'rotateY(180deg)' },
+      ], { duration: 540, easing: 'ease-out', fill: 'forwards' });
+      motions.push(flip.finished);
+    }
+    await Promise.race([Promise.all(motions).catch(() => {}),
+      new Promise(resolve => setTimeout(resolve, 680))]);
+    target.classList.add('card-arrived');
+  } catch (error) {
+    console.warn('Card animation unavailable:', error);
+  } finally { overlay.remove(); }
 }
 async function choose(message, options, { cards = false, cancel = false } = {}) {
   return new Promise(resolve => {
@@ -259,12 +324,16 @@ async function choose(message, options, { cards = false, cancel = false } = {}) 
   });
 }
 function recentAiPlays(before, after) {
-  if (before?.game !== 'four-color' || after?.game !== 'four-color' || after.revision <= before.revision) return [];
+  if (before?.game !== 'four-color' || after?.game !== 'four-color') return [];
+  return newEventsSince(before, after).filter(event => event.type === 'play' &&
+    after.players.some(player => player.id === event.player && player.kind === 'ai')).slice(-4);
+}
+function newEventsSince(before, after) {
+  if (!before || !after || after.revision <= before.revision) return [];
   const oldEvents = before.events || [], newEvents = after.events || [];
   let overlap = Math.min(oldEvents.length, newEvents.length);
   while (overlap > 0 && JSON.stringify(oldEvents.slice(-overlap)) !== JSON.stringify(newEvents.slice(0, overlap))) overlap--;
-  return newEvents.slice(overlap).filter(event => event.type === 'play' &&
-    after.players.some(player => player.id === event.player && player.kind === 'ai')).slice(-4);
+  return newEvents.slice(overlap);
 }
 async function animateAiPlays(events, players, initialDiscards = []) {
   if (!events.length || !motionEnabled() || state.page !== 'table') return;
@@ -276,43 +345,35 @@ async function animateAiPlays(events, players, initialDiscards = []) {
     if (state.page !== 'table') break;
     const player = players.find(p => p.id === event.player);
     const seat = [...document.querySelectorAll('.opponent')].find(el => el.getAttribute('data-player-id') === event.player);
-    const start = (seat || field).getBoundingClientRect();
-    const end = (discard.lastElementChild || discard).getBoundingClientRect();
-    const fromX = start.left + (start.width - 90) / 2, fromY = start.top + (start.height - 128) / 2;
-    const dx = end.left + (end.width - 90) / 2 - fromX, dy = end.top + (end.height - 128) / 2 - fromY;
-    const card = node('div', { class: 'ai-flight-card' },
-      node('div', { class: 'ai-flight-inner' }, node('div', { class: 'ai-flight-back' }, image('cover', '', true)),
-        node('div', { class: 'ai-flight-front' }, image(event.card, '', true))));
-    card.style.left = `${fromX}px`; card.style.top = `${fromY}px`;
-    const overlay = node('div', { class: 'ai-flight-overlay', 'aria-live': 'polite' },
-      node('div', { class: 'ai-flight-label' }, `${player?.name || 'SLAI'} plays ${event.card}`), card);
-    document.body.append(overlay);
-    try {
-      // Move the card independently from its flip. Rotating both the wrapper
-      // and its faces made some browsers display the cover again on landing.
-      const movement = card.animate([
-        { transform: 'translate(0, 0) scale(.7)', opacity: .85 },
-        { transform: `translate(${dx * .55}px, ${dy * .55}px) scale(1.06)`, opacity: 1, offset: .6 },
-        { transform: `translate(${dx}px, ${dy}px) scale(1)`, opacity: 1 },
-      ], { duration: 560, easing: 'cubic-bezier(.2,.7,.2,1)', fill: 'forwards' });
-      const flip = card.querySelector('.ai-flight-inner').animate([
-        { transform: 'rotateY(0deg)' },
-        { transform: 'rotateY(180deg)', offset: .75 },
-        { transform: 'rotateY(180deg)' },
-      ], { duration: 560, easing: 'ease-out', fill: 'forwards' });
-      await Promise.race([Promise.all([movement.finished, flip.finished]).catch(() => {}),
-        new Promise(resolve => setTimeout(resolve, 750))]);
-      // The server already resolved this action. Only the public preview changes;
-      // the authoritative discard and turn arrive in the final state render.
-      shown.push(event.card);
-      const replacement = discardStack(shown);
-      discard.replaceWith(replacement);
-      discard = replacement;
-    } catch (error) {
-      // An animation API/display failure must never invalidate a move that the
-      // server has already committed. The final render restores its true state.
-      console.warn('Card animation unavailable:', error);
-    } finally { overlay.remove(); }
+    await cardFlight({ source: seat || field, target: discard.lastElementChild || discard,
+      card: event.card, label: `${player?.name || 'SLAI'} plays ${event.card}` });
+    shown.push(event.card);
+    const replacement = discardStack(shown);
+    discard.replaceWith(replacement);
+    discard = replacement;
+  }
+}
+async function animateVariantMoves(before, after, actor, command, args) {
+  if (!motionEnabled() || state.page !== 'table' || !['skip-bo', 'knuckles'].includes(after.game)) return;
+  const publicMoves = newEventsSince(before, after).filter(event =>
+    (event.type === 'play' || event.type === 'discard') && event.card);
+  const selected = publicMoves.filter(e => e.player === actor).slice(0, 1);
+  const aiPlays = publicMoves.filter(e => after.players.some(p => p.id === e.player && p.kind === 'ai')).slice(-4);
+  for (const event of [...selected, ...aiPlays]) {
+    if (state.page !== 'table') break;
+    const target = event.type === 'play' ?
+      [...document.querySelectorAll('[data-variant-build]')].find(el => el.getAttribute('data-variant-build') === String(event.pile)) :
+      after.game === 'knuckles' ? document.querySelector('[data-variant-main-discard]') :
+      [...document.querySelectorAll('[data-variant-discard]')].find(el =>
+        el.getAttribute('data-variant-discard') === `${event.player}:${event.pile}`);
+    const own = event.player === actor;
+    const source = own ? [...document.querySelectorAll('[data-card]')].find(el =>
+      el.getAttribute('data-card') === args.card) :
+      [...document.querySelectorAll('[data-player-id]')].find(el => el.getAttribute('data-player-id') === event.player);
+    const participant = after.players.find(p => p.id === event.player);
+    await cardFlight({ source: source || document.querySelector('.variant-players'), target,
+      card: event.card, collection: after.game === 'skip-bo' ? 'colors' : 'symbols',
+      reveal: !own, label: `${participant?.name || 'Player'} ${event.type === 'play' ? 'builds' : 'discards'} ${event.card}` });
   }
 }
 async function refreshMatch(viewer = state.viewer) {
@@ -337,8 +398,15 @@ async function perform(actor, command, args = {}) {
   const result = await api(`/matches/${match.id}/actions`, {
     method: 'POST', body: JSON.stringify({ actor, command, args, revision: match.revision }) });
   const aiPlays = recentAiPlays(match, result);
+  if (match.game === 'four-color' && command === 'play') {
+    const pile = document.querySelector('[data-pile="discard"] .discard-stack');
+    await animatePlayedCard(args.card, pile?.lastElementChild || pile);
+    if (pile && result.discard.includes(args.card))
+      pile.replaceWith(discardStack([...match.discard, args.card]));
+  }
   await animateAiPlays(aiPlays, result.players,
     result.game === 'four-color' ? result.discard.slice(0, result.discard.length - aiPlays.length) : []);
+  await animateVariantMoves(match, result, actor, command, args);
   state.selected.clear(); state.lastCard = false; state.ready = false; state.plan = [];
   const solo = soloHumanId(result);
   const nextDecision = result.game === 'fourfold' ? result.players.find(p => p.kind === 'human' && !p.ready)?.id :
@@ -365,7 +433,6 @@ async function playCard(card) {
     args.steal = await choose('Take an earlier discard', match.stealable.map(c => [c, c]), { cards: true, cancel: true });
     if (args.steal == null) return;
   }
-  await animatePlayedCard(card);
   await perform(player.id, 'play', args);
 }
 function table() {
@@ -412,6 +479,8 @@ function table() {
         m.wild_rank == null ? '' : ` · Rank ${m.wild_rank}`,
         m.stop_player != null ? ' · STOP active' : '')),
     handoff ? handoffPanel('four-color', next, 'hand') : null,
+    m.winner ? section(node('p', {}, 'Game completed. Ready for another round?'),
+      node('div', { class: 'row' }, replayButton(), button('Return home', () => nav('home')))) :
     me ? node('div', { class: `hand-area ${state.revealAnimation ? 'reveal-animate' : ''}` }, node('div', { class: 'row split' }, title(`${me.name}'s hand`, 3),
       node('div', { class: 'row' },
         button(state.lastCard ? 'LAST CARD! ✓' : 'Call LAST CARD!', () => { state.lastCard = !state.lastCard; render(); },
@@ -430,7 +499,7 @@ function table() {
           { class: 'primary', disabled: state.selected.size !== choice.count })) : null,
       m.challenge_open && m.last_uncalled != null && m.players[m.last_uncalled].id !== me.id ?
         button('Challenge a missed LAST CARD!', () => task(() => perform(me.id, 'challenge')), { class: 'warning' }) : null)
-      : handoff ? null : section('Game completed. Return to Home or review another game.'),
+      : null,
     node('div', { class: 'events' }, title('Table history', 3),
       ...m.events.slice(-5).reverse().map(e => node('div', { class: 'event' }, e.type.replace('_', ' '),
         e.player ? ` · ${e.player}` : '', e.card ? ` · ${e.card}` : ''))));
@@ -458,7 +527,8 @@ function variantTable() {
   }
   const actions = (me ? m.legal_actions || [] : []).map(a => {
     const token = a.args.card || (a.command === 'take' && a.args.source === 'discard' ? m.discard.at(-1) : null);
-    const tile = button('', () => task(() => perform(me.id, a.command, a.args)), { class: 'variant-action' });
+    const tile = button('', () => task(() => perform(me.id, a.command, a.args)), {
+      class: 'variant-action', ...(a.args.card ? { 'data-card': a.args.card } : {}) });
     if (token) tile.append(art(token));
     tile.append(node('span', {}, actionLabel(a)));
     return tile;
@@ -467,21 +537,26 @@ function variantTable() {
     m.game === '21' ? '21 · COMPETITIVE' : 'BLACKJACK';
   const content = [];
   if (m.game === 'skip-bo') {
+    content.push(node('p', { class: 'minor' },
+      `${m.short_game ? 'Short · 10-card stock' : 'Standard stock'} · ${m.partnership ? 'Partnership teams' : 'Individual play'} · ` +
+      `Dealer: ${m.players[m.dealer ?? 0].name} · Draw pile: ${m.draw_count}`));
     content.push(section(title('Shared building piles · 1 → 12', 3), node('div', { class: 'variant-piles' },
-      ...m.building.map((pile, i) => node('div', { class: 'variant-pile' },
+      ...m.building.map((pile, i) => node('div', { class: 'variant-pile', 'data-variant-build': String(i) },
         node('span', { class: 'minor' }, `Build ${i + 1} · Next ${pile.length + 1}`),
         art(pile.at(-1)?.card), node('small', {}, pile.length ? `Current: ${pile.at(-1).rank}` : 'Start at 1'))))));
     content.push(section(title('Stock and personal discard piles', 3), node('div', { class: 'variant-players' },
-      ...m.players.map(p => node('div', { class: 'variant-player' }, node('b', {}, `${p.name} · Stock ${p.stock_count}`),
+      ...m.players.map(p => node('div', { class: 'variant-player', 'data-player-id': p.id },
+        node('b', {}, `${p.name} · Stock ${p.stock_count}${p.team != null ? ` · Team ${p.team + 1}` : ''}`),
         node('div', { class: 'variant-piles' }, node('div', { class: 'variant-pile' },
           node('small', {}, 'Stock top'), art(p.stock_top)),
-        ...p.discards.map((token, i) => node('div', { class: 'variant-pile' }, node('small', {}, `Discard ${i + 1}`), art(token)))))))));
+        ...p.discards.map((token, i) => node('div', { class: 'variant-pile', 'data-variant-discard': `${p.id}:${i}` },
+          node('small', {}, `Discard ${i + 1}`), art(token)))))))));
     if (me) content.push(section(title(`${me.name}'s hand`, 3), cardRow(me.hand)));
   } else if (m.game === 'knuckles') {
     content.push(section(title('Draw and discard', 3),
       node('div', { class: 'variant-piles' }, node('div', { class: 'variant-pile' },
         node('small', {}, `Draw · ${m.draw_count}`), art('cover')),
-      node('div', { class: 'variant-pile' }, node('small', {}, 'Discard'), art(m.discard.at(-1))))));
+      node('div', { class: 'variant-pile', 'data-variant-main-discard': 'true' }, node('small', {}, 'Discard'), art(m.discard.at(-1))))));
     if (m.knocker) content.push(section(node('b', {}, `${m.players.find(p => p.id === m.knocker)?.name || m.knocker} knocked!`),
       node('p', { class: 'minor' }, `${m.remaining} final player turns remaining.`)));
     if (me) content.push(section(title(`${me.name}'s hand · ${me.total} points (lower is better)`, 3), cardRow(me.hand)));
@@ -515,7 +590,12 @@ function variantTable() {
       node('p', { class: 'minor' }, m.game === 'skip-bo' ?
         'Select a legal card and destination below. Playing from your stock clears the pile needed to win.' :
         'Only moves approved by the game rules are shown.'), node('div', { class: 'variant-actions' }, ...actions)) : null,
-    completed ? section(title(status, 3), button('Return to launcher', () => nav('home'), { class: 'primary' })) : null,
+    completed ? section(title(status, 3),
+      m.game === 'skip-bo' ? node('div', { class: 'score-summary' },
+        node('p', {}, `Round points: ${m.points_awarded ?? 0}${m.series_complete ? ' · 500-point series complete!' : ''}`),
+        ...Object.entries(m.series_scores || {}).map(([participant, points]) =>
+          node('span', { class: 'chip' }, `${participant}: ${points} points`))) : null,
+      node('div', { class: 'row' }, replayButton(), button('Return to launcher', () => nav('home')))) : null,
     node('div', { class: 'events' }, title('Table history', 3),
       ...m.events.slice(-8).reverse().map(e => node('div', { class: 'event' }, e.type.replaceAll('_', ' '),
         e.player ? ` · ${e.player}` : '', e.card ? ` · ${e.card}` : ''))));
@@ -567,7 +647,7 @@ function fourfoldTable() {
       node('p', { class: 'minor' }, `${p.available_count} cards remaining${p.foundation ? ` · Foundation ${p.foundation.card}` : ''}`)))),
     handoff ? handoffPanel('fourfold', next, 'planning area') : null,
     m.phase === 'complete' ? section(title(`Winners: ${m.players.filter(p => m.winners.includes(p.id)).map(p => p.name).join(' and ')}`, 2),
-      button('Return home', () => nav('home'), { class: 'primary' })) :
+      node('div', { class: 'row' }, replayButton(), button('Return home', () => nav('home')))) :
       me && !me.ready ? node('div', { class: state.revealAnimation ? 'reveal-animate' : '' }, section(node('div', { class: 'row split' }, title(`${me.name}: secret orders`, 2),
         node('b', {}, `${cp} / 16 CP · ${treasury} / ${me.treasury} Treasury`)),
         node('p', { class: 'muted' }, 'Choose up to three different estates. Click a card to add or remove it. Secret choices lock when submitted.'),
@@ -624,9 +704,12 @@ function help() {
   if (game === 'skip-bo') return node('div', { class: 'narrow' }, title('How to play Skip-Bo', 1),
     section(title('Objective', 3), node('p', {}, 'Be first to empty your personal stockpile.'),
       title('Cards', 3), node('p', {}, 'The 162-card deck uses repeated digital instances of the existing colored 1–12 and Wild faces. Card colors have no effect; Wild can represent any required number.'),
-      title('Your turn', 3), node('p', {}, 'Start with a five-card hand. Build up to four common piles in ascending order from 1 through 12, using your hand, the top of your stockpile, or the top of your own four discard piles.'),
+      title('Dealer and turns', 3), node('p', {}, 'Highest-number-card draw selects the dealer (Wilds do not count); the player to their left starts. On the next round, the dealer moves one seat left. Draw up to five cards at the beginning of each turn.'),
+      title('Your turn', 3), node('p', {}, 'Build up to four common piles in ascending order from 1 through 12, using your hand, the top of your stockpile, or the top of your own four discard piles. Only a 1 or Wild can start a pile. Use as many playable cards as you wish.'),
       title('End turn', 3), node('p', {}, 'Discard one hand card to one of your four personal discard piles. Clearing your hand refills it; completing a pile at 12 makes its cards available for recycling.'),
-      node('p', { class: 'minor' }, '2–4 players: 30 stock cards each. 5–6 players: 20. The artwork is original; Skip-Bo is a Mattel trademark.')),
+      title('Scoring and variants', 3), node('p', {}, '2–4 players begin with 30 stock cards each; 5–6 with 20. Optional short games use 10. The winner earns 25 points plus five per card left in opponents’ stocks; the first to 500 wins the series.'),
+      node('p', {}, 'In partnership play (four or six players), a player may also build using their teammate’s visible stock top or discard-pile tops. Both partners must empty their stockpiles to win.'),
+      node('p', { class: 'minor' }, 'Automatic hand sizes and validated turn order prevent accidental overdraw/out-of-turn mistakes. The artwork is original; Skip-Bo is a Mattel trademark.')),
     button('Back to table', returnFromRules));
   if (game === '21' || game === 'blackjack') return node('div', { class: 'narrow' }, title(`How to play ${game === '21' ? 'Competitive 21' : 'Blackjack'}`, 1),
     section(title('Card values', 3), node('p', {}, 'Aces count as 1 or 11. Number cards count at face value; J, Q and K count as 10. Go over 21 and you bust.'),

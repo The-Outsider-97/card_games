@@ -55,8 +55,8 @@ const context = vm.createContext({ Node: FakeNode, document,
   setTimeout, console, URL, sessionStorage: { getItem: () => null } });
 const filename = path.join(__dirname, '..', 'src', 'client', 'app.js');
 const app = fs.readFileSync(filename, 'utf8').split('\ninitialize();')[0];
-vm.runInContext(`${app}\n globalThis.ui = {state, table, fourfoldTable, render, perform, soloHumanId, cardArtPath, choose, recentAiPlays, animateAiPlays};`, context, { filename });
-const { state, table, fourfoldTable, render, perform, soloHumanId, cardArtPath, choose, recentAiPlays, animateAiPlays } = context.ui;
+vm.runInContext(`${app}\n globalThis.ui = {state, table, fourfoldTable, render, perform, soloHumanId, cardArtPath, choose, recentAiPlays, animateAiPlays, animateVariantMoves, playAgain};`, context, { filename });
+const { state, table, fourfoldTable, render, perform, soloHumanId, cardArtPath, choose, recentAiPlays, animateAiPlays, animateVariantMoves, playAgain } = context.ui;
 
 assert.equal(cardArtPath('+5-yellow'), '/api/card-art/plus5-yellow');
 assert.equal(cardArtPath('+2-neutral'), '/api/card-art/plus2-neutral');
@@ -189,7 +189,7 @@ context.fetch = async () => ({ ok: true, status: 200,
   assert.equal(discard.replacedWith.children.at(-1).getAttribute('src'), '/api/card-art/plus5-green',
     'An AI play should land face-up on the visible discard stack');
   assert.equal(FakeNode.animations.length, 2, 'Use independent movement and face-reveal animations');
-  assert.equal(FakeNode.animations[0].options.duration, 560);
+  assert.equal(FakeNode.animations[0].options.duration, 540);
   assert.doesNotMatch(FakeNode.animations[0].keyframes.at(-1).transform, /rotateY/,
     'Movement must not rotate the entire card back to its cover');
   assert.match(FakeNode.animations[1].keyframes.at(-1).transform, /rotateY\(180deg\)/);
@@ -221,5 +221,41 @@ context.fetch = async () => ({ ok: true, status: 200,
     legal_actions: [{ command: 'stand', args: {} }] };
   assert.match(flatten(table()), /A-hearts.jpg/);
   assert.doesNotMatch(flatten(table()), /PRIVATE_SECRET_CARD/, 'Opponent hand never renders in ongoing Blackjack');
+  const completedColor = { id: 'finished-color', game: 'four-color', current: 0, direction: 1,
+    winner: 'h1', revision: 8, players: [
+      { id: 'h1', name: 'Human', kind: 'human', count: 0, hand: [], verdict: 0 },
+      { id: 'h2', name: 'Other', kind: 'human', count: 2, hand: [], verdict: 0 }],
+    discard: ['05-blue'], draw_count: 10, active_color: 'blue', wild_rank: null, stop_player: null,
+    events: [], outstanding: [], choices: [], legal: [] };
+  state.match = completedColor;
+  assert.match(flatten(table()), /Play again/, 'Four-Color winner must get a replay button, even when hand is visible');
+  state.match = { ...state.match, game: 'blackjack' };
+  const completed = { ...state.match, phase: 'complete', winners: ['h1'],
+    dealer: { upcard: '06-spades', hand: ['06-spades', '10-hearts'], count: 2, total: 16 },
+    players: state.match.players.map(p => ({ ...p, hand: [], done: true, total: 18 })) };
+  state.match = completed;
+  assert.match(flatten(table()), /Play again/, 'Completed local games need a replay action');
+  const replayed = { ...completed, id: 'blackjack-next', phase: 'play', winners: [],
+    current: 0, revision: 0, players: completed.players.map(p => ({ ...p, done: false })) };
+  context.fetch = async url => ({ ok: true, status: 200, json: async () => ({ ok: true,
+    data: url.includes('/rematch') ? replayed : url.endsWith('/stats') ? {} : [] }) });
+  await playAgain();
+  assert.equal(state.match.id, 'blackjack-next');
+  assert.equal(state.ready, false, 'Multiplayer rematch needs another private handoff');
+
+  const publicSkip = { game: 'skip-bo', revision: 4, events: [], players: [
+    { id: 'h1', name: 'Human', kind: 'human' }, { id: 'ai', name: 'SLAI', kind: 'ai' }] };
+  const publicAfter = { ...publicSkip, revision: 5,
+    events: [{ type: 'play', player: 'ai', card: '01-blue', pile: 0 }] };
+  state.page = 'table'; state.prefs.motion = true; systemReducedMotion = false;
+  const destination = new FakeNode('div');
+  destination.setAttribute('data-variant-build', '0');
+  const playerSpot = new FakeNode('div'); playerSpot.setAttribute('data-player-id', 'ai');
+  document.querySelectorAll = selector => selector.includes('data-variant-build') ? [destination] :
+    selector.includes('data-player-id') ? [playerSpot] : [];
+  await animateVariantMoves(publicSkip, publicAfter, 'h1', 'discard', { card: '08-red' });
+  assert.ok(destination.className.includes('card-arrived'), 'Public Skip-Bo AI plays animate to a building pile');
+  assert.match(FakeNode.animations.at(-1).keyframes.at(-1).transform, /rotateY\(180deg\)/,
+    'Variant AI card flight must reveal the played face');
   console.log('Card Games DOM checks passed: handoffs, card art, Steal picker, next player, and AI plays.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

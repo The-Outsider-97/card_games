@@ -111,16 +111,58 @@ class SkipBoMatch(VariantMatch):
     DECK = SKIP_DECK
 
     @classmethod
-    def new(cls, participants: list[dict[str, str]], seed: int | None = None):
+    def new(cls, participants: list[dict[str, str]], seed: int | None = None,
+            *, short_game: bool = False, partnership: bool = False,
+            dealer: int | None = None, series_scores: dict[str, int] | None = None):
         players = _participants(participants, 2, 6)
-        draw = _shuffle(list(cls.DECK), seed)
-        stock_size = 30 if len(players) <= 4 else 20
-        for p in players:
+        if type(short_game) is not bool or type(partnership) is not bool:
+            raise GameError("Skip-Bo options must be booleans")
+        if partnership and len(players) not in (4, 6):
+            raise GameError("Partnership Skip-Bo requires four or six players")
+        if dealer is not None and (type(dealer) is not int or not 0 <= dealer < len(players)):
+            raise GameError("Invalid dealer seat")
+        rng = Random(seed) if seed is not None else SystemRandom()
+        draw = list(cls.DECK)
+        rng.shuffle(draw)
+        if dealer is None:
+            # Dealer selection follows the published high-card draw: Wilds
+            # do not count, and tied highs redraw. All cards are reshuffled
+            # into the deck before any stock is dealt.
+            candidates = list(range(len(players)))
+            drawn: list[str] = []
+            while len(candidates) > 1:
+                ranks: dict[int, int] = {}
+                for seat in candidates:
+                    while draw:
+                        card = draw.pop()
+                        drawn.append(card)
+                        if not face(card).startswith("Wild-"):
+                            ranks[seat] = int(face(card).split("-", 1)[0])
+                            break
+                if not ranks:
+                    raise GameError("Unable to select a dealer")
+                maximum = max(ranks.values())
+                candidates = [seat for seat, value in ranks.items() if value == maximum]
+            dealer = candidates[0]
+            draw.extend(drawn)
+            rng.shuffle(draw)
+        stock_size = 10 if short_game else 30 if len(players) <= 4 else 20
+        teams = len(players) // 2 if partnership else None
+        for seat, p in enumerate(players):
             p.update(stock=[draw.pop() for _ in range(stock_size)], hand=[], discards=[[], [], [], []])
+            if teams is not None:
+                p["team"] = seat % teams
+        score_keys = [f"team:{i}" for i in range(teams)] if teams is not None else [p["id"] for p in players]
+        if series_scores is not None and (set(series_scores) != set(score_keys) or
+                                          any(type(n) is not int or n < 0 for n in series_scores.values())):
+            raise GameError("Invalid prior Skip-Bo scores")
         state = {"id": uuid4().hex, "game": "skip-bo", "rules": "skip-bo-162-adapted-art-v1",
                  "revision": 0, "created_at": time.time(), "completed_at": None, "phase": "play",
-                 "current": 0, "players": players, "draw": draw, "building": [[], [], [], []],
-                 "completed": [], "recycles": 0, "seed": seed, "events": [], "winner": None, "winners": []}
+                 "current": (dealer + 1) % len(players), "dealer": dealer, "short_game": short_game,
+                 "partnership": partnership, "players": players, "draw": draw, "building": [[], [], [], []],
+                 "completed": [], "recycles": 0, "seed": seed, "events": [], "winner": None, "winners": [],
+                 "series_scores": deepcopy(series_scores) if series_scores is not None else dict.fromkeys(score_keys, 0),
+                 "points_awarded": 0, "series_complete": False}
         match = cls(state)
         match._refill()
         match.validate()
@@ -164,6 +206,11 @@ class SkipBoMatch(VariantMatch):
         sources = ([] if not player["stock"] else [("stock", player["stock"][-1])])
         sources += [("hand", card) for card in player["hand"]]
         sources += [(f"discard:{i}", pile[-1]) for i, pile in enumerate(player["discards"]) if pile]
+        if s.get("partnership"):
+            partner = next(p for p in s["players"] if p["team"] == player["team"] and p["id"] != actor)
+            if partner["stock"]:
+                sources.append(("partner_stock", partner["stock"][-1]))
+            sources += [(f"partner_discard:{i}", pile[-1]) for i, pile in enumerate(partner["discards"]) if pile]
         actions = []
         for i, pile in enumerate(s["building"]):
             rank = len(pile) + 1
@@ -180,7 +227,10 @@ class SkipBoMatch(VariantMatch):
         p = s["players"][s["current"]]
         if command == "build":
             source, card, index = args["source"], args["card"], args["pile"]
-            pile = p["stock"] if source == "stock" else p["hand"] if source == "hand" else p["discards"][int(source.split(":")[1])]
+            owner = p
+            if source.startswith("partner_"):
+                owner = next(other for other in s["players"] if other.get("team") == p.get("team") and other["id"] != actor)
+            pile = owner["stock"] if source in ("stock", "partner_stock") else p["hand"] if source == "hand" else owner["discards"][int(source.split(":")[1])]
             if source == "hand":
                 pile.remove(card)
             else:
@@ -192,8 +242,17 @@ class SkipBoMatch(VariantMatch):
                 s["completed"].extend(x["card"] for x in s["building"][index])
                 s["building"][index] = []
                 self._event("pile_complete", pile=index)
-            if not p["stock"]:
-                self._complete([actor])
+            winners = ([other["id"] for other in s["players"] if other["team"] == p["team"]]
+                       if s.get("partnership") and all(not other["stock"] for other in s["players"] if other["team"] == p["team"])
+                       else [actor] if not s.get("partnership") and not p["stock"] else [])
+            if winners:
+                winning_key = f"team:{p['team']}" if s.get("partnership") else actor
+                points = 25 + 5 * sum(len(other["stock"]) for other in s["players"] if other["id"] not in winners)
+                s["points_awarded"] = points
+                s["series_scores"][winning_key] += points
+                s["series_complete"] = s["series_scores"][winning_key] >= 500
+                self._event("scored", points=points, total=s["series_scores"][winning_key], winners=winners)
+                self._complete(winners)
             elif not p["hand"]:
                 self._refill()
             return
@@ -213,8 +272,12 @@ class SkipBoMatch(VariantMatch):
     def view(self, viewer: str | None = None) -> dict[str, Any]:
         s = self.state
         result = {k: deepcopy(s[k]) for k in ("id", "game", "rules", "revision", "phase", "current", "winner", "winners")}
+        for key in ("dealer", "short_game", "partnership", "series_scores", "points_awarded", "series_complete"):
+            if key in s:
+                result[key] = deepcopy(s[key])
         result.update(draw_count=len(s["draw"]), building=deepcopy(s["building"]), events=deepcopy(s["events"][-15:]))
         result["players"] = [{"id": p["id"], "name": p["name"], "kind": p["kind"],
+                              "team": p.get("team"),
                               "stock_top": p["stock"][-1] if p["stock"] else None,
                               "stock_count": len(p["stock"]), "hand_count": len(p["hand"]),
                               "hand": deepcopy(p["hand"]) if viewer == p["id"] else [],
@@ -429,9 +492,19 @@ class KnucklesMatch(VariantMatch):
 ENGINES = {"skip-bo": SkipBoMatch, "21": TwentyOneMatch, "blackjack": TwentyOneMatch, "knuckles": KnucklesMatch}
 
 
-def new_variant(game: str, participants: list[dict[str, str]], seed: int | None = None) -> VariantMatch:
+def new_variant(game: str, participants: list[dict[str, str]], seed: int | None = None,
+                options: dict[str, Any] | None = None) -> VariantMatch:
     if game not in ENGINES:
         raise GameError("Unknown game")
+    options = options or {}
+    if not isinstance(options, dict):
+        raise GameError("Game options must be an object")
+    if game == "skip-bo":
+        if not set(options) <= {"short_game", "partnership"}:
+            raise GameError("Unsupported Skip-Bo rules option")
+        return SkipBoMatch.new(participants, seed=seed, **options)
+    if options:
+        raise GameError("This game does not support rule options")
     if game in ("21", "blackjack"):
         return TwentyOneMatch.new(participants, seed=seed, game=game)
     return ENGINES[game].new(participants, seed=seed)

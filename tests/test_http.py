@@ -131,6 +131,37 @@ class SharedServerTests(unittest.TestCase):
                             "actor": "me", "revision": match["revision"], **action})
                     self.assertEqual(stale.exception.code, 400)
 
+    def test_skip_bo_short_setup_and_completed_rematch_are_server_owned(self):
+        short = self.request("/api/matches", {"game": "skip-bo", "options": {"short_game": True},
+            "participants": [{"id": "one", "kind": "human"}, {"id": "two", "kind": "human"}]})
+        self.assertTrue(short["short_game"])
+        self.assertEqual([p["stock_count"] for p in short["players"]], [10, 10])
+        with self.assertRaises(HTTPError) as premature:
+            self.request(f"/api/matches/{short['id']}/rematch", {})
+        self.assertEqual(premature.exception.code, 400)
+        with self.assertRaises(HTTPError) as invalid:
+            self.request("/api/matches", {"game": "skip-bo", "options": {"partnership": True},
+                "participants": [{"id": "one", "kind": "human"}, {"id": "two", "kind": "human"}]})
+        self.assertEqual(invalid.exception.code, 400)
+
+        # Complete a real 21 round using legal human actions, then verify
+        # one-use rematch creation under repeated requests.
+        current = self.request("/api/matches", {"game": "21", "participants": [
+            {"id": "one", "kind": "human"}, {"id": "two", "kind": "human"}]})
+        for _ in range(3):
+            if current["phase"] == "complete":
+                break
+            actor = current["players"][current["current"]]["id"]
+            viewed = self.request(f"/api/matches/{current['id']}?viewer={actor}")
+            current = self.request(f"/api/matches/{current['id']}/actions", {
+                "actor": actor, "revision": viewed["revision"], "command": "stand", "args": {}})
+        self.assertEqual(current["phase"], "complete")
+        first = self.request(f"/api/matches/{current['id']}/rematch", {})
+        again = self.request(f"/api/matches/{current['id']}/rematch", {})
+        self.assertEqual(first["id"], again["id"])
+        self.assertNotEqual(first["id"], current["id"])
+        self.assertEqual(first["game"], "21")
+
     def test_settings_roundtrip_and_security_marker(self):
         settings = self.request("/api/settings")
         self.assertEqual(settings["theme"], "dark")
