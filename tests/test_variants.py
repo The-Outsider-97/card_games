@@ -36,6 +36,52 @@ class VariantRulesTests(unittest.TestCase):
         self.assertTrue(view["players"][1]["stock_top"])
         self.assertEqual([len(p["stock"]) for p in SkipBoMatch.new(
             [{"id": str(i)} for i in range(5)], seed=1).state["players"]], [20] * 5)
+        self.assertEqual(m.state["current"], (m.state["dealer"] + 1) % len(PARTICIPANTS))
+        self.assertEqual(SkipBoMatch.new(PARTICIPANTS, seed=11).state["dealer"], m.state["dealer"])
+
+    def test_official_short_game_and_partnership_sources_and_scoring(self):
+        participants = [{"id": f"p{i}"} for i in range(4)]
+        m = SkipBoMatch.new(participants, seed=7, short_game=True, partnership=True)
+        self.assertTrue(m.state["short_game"])
+        self.assertEqual([len(p["stock"]) for p in m.state["players"]], [10] * 4)
+        self.assertEqual([p["team"] for p in m.state["players"]], [0, 1, 0, 1])
+        current = m.state["current"]
+        partner = (current + 2) % 4
+        actor = m.state["players"][current]["id"]
+        owner = m.state["players"][partner]
+        # Construct a legal game state with one last stock card on each
+        # team member; relocate cards to the draw pile to conserve all 162.
+        for i in (current, partner):
+            p = m.state["players"][i]
+            m.state["draw"].extend(p["stock"][:-1])
+            p["stock"] = p["stock"][-1:]
+            wild = next(card for card in m.state["draw"] if face(card).startswith("Wild-"))
+            index = m.state["draw"].index(wild)
+            m.state["draw"][index], p["stock"][-1] = p["stock"][-1], wild
+        m.validate()
+        partner_action = next(a for a in m.legal_actions(actor)
+                              if a["command"] == "build" and a["args"]["source"] == "partner_stock")
+        m.act(actor, **partner_action["args"], command="build")
+        self.assertEqual(m.state["phase"], "play", "One partner's empty stock must not end a team game")
+        own_action = next(a for a in m.legal_actions(actor)
+                          if a["command"] == "build" and a["args"]["source"] == "stock")
+        m.act(actor, **own_action["args"], command="build")
+        self.assertEqual(m.state["phase"], "complete")
+        self.assertEqual(set(m.state["winners"]), {actor, owner["id"]})
+        expected_points = 25 + 5 * 20  # The two losing stocks retain 10 cards each.
+        self.assertEqual(m.state["points_awarded"], expected_points)
+        self.assertEqual(m.state["series_scores"][f"team:{m.state['players'][current]['team']}"], expected_points)
+        m.validate()
+
+    def test_unapproved_or_invalid_skip_bo_options_rejected(self):
+        with self.assertRaises(GameError):
+            new_variant("skip-bo", PARTICIPANTS, options={"unofficial_action_card": True})
+        with self.assertRaises(GameError):
+            new_variant("skip-bo", PARTICIPANTS, options={"short_game": "false"})
+        with self.assertRaises(GameError):
+            new_variant("skip-bo", PARTICIPANTS, options={"partnership": True})
+        with self.assertRaises(GameError):
+            new_variant("blackjack", PARTICIPANTS, options={"short_game": True})
 
     def test_invalid_actions_do_not_change_state(self):
         import json

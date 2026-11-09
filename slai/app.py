@@ -147,7 +147,12 @@ def build_router():
         if not isinstance(participants, list) or any(not isinstance(p, dict) for p in participants):
             raise BadRequest("Participants must be a list of player definitions")
         return handle(app.service.create, owner(app, req), participants,
-                      difficulty=payload.get("difficulty"), game=payload.get("game", "four-color"))
+                      difficulty=payload.get("difficulty"), game=payload.get("game", "four-color"),
+                      options=payload.get("options"))
+
+    @router.route("POST", "/api/matches/{id}/rematch")
+    def rematch(app, req):
+        return handle(app.service.rematch, owner(app, req), req.params["id"])
 
     @router.route("GET", "/api/matches/{id}")
     def get_match(app, req):

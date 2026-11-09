@@ -186,7 +186,8 @@ class CardGamesService:
         ]
 
     def create(self, owner: str, participants: list[dict[str, str]], seed: int | None = None,
-               difficulty: str | None = None, game: str = "four-color") -> dict[str, Any]:
+               difficulty: str | None = None, game: str = "four-color",
+               options: dict[str, Any] | None = None) -> dict[str, Any]:
         if not owner or len(owner) > 80:
             raise GameError("Invalid owner")
         difficulty = difficulty or self.preferences(owner)["difficulty"]
@@ -194,15 +195,56 @@ class CardGamesService:
             raise GameError("Invalid AI difficulty")
         if game not in ("four-color", "fourfold", *ENGINES):
             raise GameError("Game rules are not available")
+        if options is not None and not isinstance(options, dict):
+            raise GameError("Game options must be an object")
+        if options and game not in ENGINES:
+            raise GameError("This game does not support rule options")
         match = (Match.new(participants, seed=seed) if game == "four-color" else
                  FourfoldMatch.new(participants, seed=seed) if game == "fourfold" else
-                 new_variant(game, participants, seed=seed))
+                 new_variant(game, participants, seed=seed, options=options))
         match.state["ai_difficulty"] = difficulty
         with self._lock, self.db.transaction():
             self._run_ai(match)
             self._save(owner, match)
         viewer = next((p["id"] for p in participants if p.get("kind", "human") == "human"), None)
         return match.view(viewer)
+
+    def rematch(self, owner: str, match_id: str) -> dict[str, Any]:
+        """Idempotently restart a completed local match with the same seats.
+
+        Skip-Bo advances the dealer and preserves official optional series
+        scores without trusting client-supplied scores or dealer position.
+        """
+        with self._lock, self.db.transaction():
+            old = self._load(owner, match_id)
+            if not self._complete(old):
+                raise GameError("Finish the current match before playing again")
+            if old.state.get("rematch_id"):
+                match = self._load(owner, old.state["rematch_id"])
+            else:
+                participants = [{key: p[key] for key in ("id", "name", "kind")}
+                                for p in old.state["players"]]
+                game = old.state["game"]
+                if game == "four-color":
+                    match = Match.new(participants)
+                elif game == "fourfold":
+                    match = FourfoldMatch.new(participants)
+                elif game == "skip-bo":
+                    scores = None if old.state.get("series_complete") else old.state.get("series_scores")
+                    match = ENGINES[game].new(participants, short_game=old.state.get("short_game", False),
+                                              partnership=old.state.get("partnership", False),
+                                              dealer=(old.state.get("dealer", 0) + 1) % len(participants),
+                                              series_scores=scores)
+                else:
+                    match = new_variant(game, participants)
+                match.state["ai_difficulty"] = old.state.get("ai_difficulty", "medium")
+                match.state["rematch_of"] = match_id
+                old.state["rematch_id"] = match.state["id"]
+                self._save(owner, old)
+                self._run_ai(match)
+                self._save(owner, match)
+            viewer = next((p["id"] for p in match.state["players"] if p["kind"] == "human"), None)
+            return match.view(viewer)
 
     def _save(self, owner: str, match: Match | FourfoldMatch | VariantMatch) -> None:
         self.db.execute("INSERT INTO matches(id,owner,data,revision,completed) VALUES(?,?,?,?,?) "

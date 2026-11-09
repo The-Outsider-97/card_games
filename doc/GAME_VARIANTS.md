@@ -29,7 +29,12 @@ canonical 119-face deck or Fourfold Mandate's deck.
 
 ## Skip-Bo
 
+- Follows the user's supplied **Mattel *How To Play SKIP-BO* (©1999)**
+  instruction sheet. A preliminary highest-card draw selects the dealer
+  (Wilds do not count, tied highs redraw); cards are returned and reshuffled
+  before dealing. The seat to the **left of the dealer** acts first.
 - 2–6 players; 30-card stockpile per player for 2–4 players, or 20 for 5–6.
+  Optional **short game** gives each player **10** stock cards instead.
 - Each turn starts/refills to five hand cards. Build four shared sequences
   upward from 1 to 12, using the **top stock card**, any own hand card, or
   **top** of any of four own discard piles. A Wild stands for the needed rank.
@@ -38,9 +43,24 @@ canonical 119-face deck or Fourfold Mandate's deck.
 - Playing one's last stock card wins immediately. Discarding a hand card to
   one personal discard pile ends a turn; clearing the hand while building
   refills it without ending the turn.
+- Optional **partnership** play is supported for 4 or 6 seats, in alternating
+  team order. On their own turn, an active player may use the top card of their
+  teammate's stock or personal discard piles; their teammate cannot take
+  actions outside their scheduled turn. A team wins only when **both** team
+  members have emptied their stockpiles.
+- In individually played rounds, the winning player earns **25 points + five
+  for each remaining card in the other players' stockpiles**. In partnerships,
+  the team receives this amount based on opposing stocks. Scores carry across
+  server-owned **Play again** rematches; the first score to **500** completes
+  the series. Starting a rematch after series completion resets its scores.
+  The dealer advances one seat left at each rematch.
 - The `pass` action is enabled only when no build/discard is legal (e.g.,
   after draw exhaustion). The engine records a terminal draw if no cards can
   be drawn or used to keep the match progressing.
+- Accidental overdraw, out-of-turn play and partnership-table talking
+  penalties are not player-triggerable in this digital version: the engine
+  automatically handles hand sizes and rejects unauthorized turns. This is
+  an intentional digital enforcement difference, not an alternative card rule.
 
 Rule reference: [Mattel Skip-Bo instruction sheet](https://service.mattel.com/instruction_sheets/42050-Skip-Bo.pdf).
 The logical quantity follows the standard deck; original Card Games artwork
@@ -107,10 +127,13 @@ presented as the definitive rules for every variant.
   returns candidate actions. Different easy/medium/hard/expert policies
   affect choices; invalid, timed-out or absent agent results fall back to a
   deterministic legal policy. These are heuristics, **not proved-optimal AI**.
-- Four-Color alone currently has animated AI plays, flipping a card from
-  cover to its public face and building a four-card face-up discard fan.
-  These new games currently update their public table immediately; their
-  card movement animation is a future presentation enhancement.
+- Four-Color animates legal human cards gliding face-up to the four-card
+  discard fan and AI cards turning **from cover to face-up** during flight.
+  Skip-Bo and Knuckles now animate **public** plays and discards using the
+  same motion primitive; hidden Blackjack and 21 draws are deliberately not
+  revealed before their rules allow it. Animation never alters server state.
+- Completed **local** games have an idempotent server-owned **Play again**
+  action, preserving seats, agent difficulty, and Skip-Bo rule options.
 
 ## Verification and limitations
 
